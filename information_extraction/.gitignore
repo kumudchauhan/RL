@@ -18,5 +18,9 @@ __pycache__/
 .DS_Store
 .claude/
 
+# Local docs
+PIPELINE.md
+SPEC.md
+
 # uv
 uv.lock
