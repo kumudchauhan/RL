@@ -1,0 +1,37 @@
+"""Verifier ABC and VerificationResult dataclass."""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+
+from ..schemas import InvoiceExtraction
+
+
+@dataclass
+class VerificationResult:
+    """Result from a single verifier."""
+
+    verifier_name: str
+    score: float  # raw score
+    max_score: float  # maximum possible score (for normalization)
+    details: dict = field(default_factory=dict)
+
+    @property
+    def normalized_score(self) -> float:
+        return self.score / self.max_score if self.max_score > 0 else 0.0
+
+
+class Verifier(ABC):
+    """Base verifier interface for Harbor RLVR."""
+
+    @property
+    @abstractmethod
+    def name(self) -> str: ...
+
+    @abstractmethod
+    def verify(
+        self,
+        prediction: InvoiceExtraction,
+        ground_truth: InvoiceExtraction,
+    ) -> VerificationResult: ...
