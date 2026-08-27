@@ -26,8 +26,9 @@ class EvaluationRunner:
         annotations_dir: str = "annotations",
         results_dir: str = "results",
         model: str = "claude-sonnet-4-20250514",
+        redact_pii: bool = True,
     ):
-        self.loader = DatasetLoader(invoices_dir, annotations_dir)
+        self.loader = DatasetLoader(invoices_dir, annotations_dir, redact_pii=redact_pii)
         self.agent = ExtractionAgent(model=model)
         self.verifier = CompositeVerifier()
         self.results_dir = Path(results_dir)
@@ -277,13 +278,23 @@ def main():
         action="store_true",
         help="Capture full rollouts for RLVR training",
     )
+    parser.add_argument(
+        "--no-pii-redaction",
+        dest="redact_pii",
+        action="store_false",
+        help="Disable PII masking (sends raw document text to the API — debugging only)",
+    )
     args = parser.parse_args()
+
+    if not args.redact_pii:
+        print("WARNING: PII redaction disabled — raw document text will be sent to the API.")
 
     runner = EvaluationRunner(
         invoices_dir=args.invoices_dir,
         annotations_dir=args.annotations_dir,
         results_dir=args.results_dir,
         model=args.model,
+        redact_pii=args.redact_pii,
     )
     summary = runner.run(capture_rollouts=args.capture_rollouts)
     print(f"\nFinal Score: {summary['overall_mean']:.4f}")

@@ -29,6 +29,35 @@ uv run extract-eval --capture-rollouts
 
 # Custom model
 uv run extract-eval --model claude-haiku-4-20250514
+
+# Disable PII masking (debugging only — sends raw document text to the API)
+uv run extract-eval --no-pii-redaction
+```
+
+## PII Redaction
+
+Documents are redacted in the parser, before any text reaches the API or a rollout file. Two
+tiers, one shared redactor per document:
+
+1. **Envelope** — recipient addresses masked in full; sender addresses keep only the vendor
+   domain (`[EMAIL_2]@vendor.example`); routing/identity headers (`Received*`, `*-SPF`, `DKIM-*`,
+   `Message-ID`, `List-Unsubscribe`, ...) are dropped.
+2. **Invoice content** — postal addresses, emails, phone numbers, card numbers, and personal
+   names in both the text and HTML bodies.
+
+Values are replaced with stable placeholders (`[PERSON_1]`, `[ADDRESS_2]`, `[CARD_1]`) so
+document structure survives, and `ParsedDocument.redaction_report` records counts only — never
+the original values. Extraction-relevant content (order numbers, totals, dates, product names)
+is deliberately preserved; `shipping_address`, `billing_address`, and `payment.last_four`
+become unextractable by design, and no verifier scores them.
+
+Configure per category with `PIIPolicy`:
+
+```python
+from info_extract.parsers.eml_parser import EmlParser
+from info_extract.parsers.pii import PIIPolicy
+
+parser = EmlParser(pii_policy=PIIPolicy(mask_addresses=False, extra_names=("Ravi",)))
 ```
 
 ## Run Tests
@@ -43,7 +72,7 @@ uv run pytest
 ```
 src/info_extract/
 ├── schemas.py              # Pydantic extraction schema
-├── parsers/                # Document parsing (.eml)
+├── parsers/                # Document parsing (.eml) + two-tier PII redaction
 ├── agent/                  # Claude API extraction (tool-use)
 ├── verifiers/              # Field, numeric, line item verifiers + composite reward
 ├── dataset/                # Annotation loader + task management

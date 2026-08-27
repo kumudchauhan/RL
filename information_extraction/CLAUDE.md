@@ -13,7 +13,8 @@ src/info_extract/
 ├── schemas.py              # Pydantic models: InvoiceExtraction, LineItem, Address, PaymentInfo
 ├── parsers/
 │   ├── base.py             # ParsedDocument dataclass + DocumentParser ABC
-│   └── eml_parser.py       # .eml → ParsedDocument (stdlib email + BeautifulSoup)
+│   ├── eml_parser.py       # .eml → ParsedDocument (stdlib email + BeautifulSoup)
+│   └── pii.py              # Two-tier PII redaction (PIIPolicy + PIIRedactor)
 ├── agent/
 │   ├── prompts.py          # System/user prompt templates
 │   └── extraction_agent.py # Claude API wrapper using forced tool-use for structured output
@@ -37,6 +38,40 @@ src/info_extract/
 - **Weighted composite reward**: field_accuracy=0.25, numeric_accuracy=0.35, line_item_f1=0.40
 - **Partial credit scoring**: fuzzy string matching for vendor names, tolerance-based numeric comparison, weighted F1 for line items
 - **Rollout capture mode**: stores full prompt/response for RLVR training data generation
+- **PII masked at the parser**, before any content reaches the API or a rollout file
+
+## PII Redaction
+
+`parsers/pii.py` masks PII in two tiers against one shared `PIIRedactor` per document, so a
+value seen in the envelope and again in the body maps to the same placeholder:
+
+1. **Envelope (tier 1)** — recipient addresses masked in full (`[EMAIL_1]`); sender addresses
+   keep the vendor domain (`[EMAIL_2]@vendor.example`) so vendor extraction still works; routing
+   and identity headers (`Received*`, `*-SPF`, `DKIM-*`, `Message-ID`, `List-Unsubscribe`, ...)
+   are dropped outright.
+2. **Content (tier 2)** — postal addresses, emails, phone numbers, card numbers (`**** 9301`,
+   `ending in 5678`, Luhn-valid PANs), and personal names in `text_body` and `html_body`.
+
+Details:
+
+- Names are discovered per document from recipient headers (display name + email local part)
+  and body cues (`Hi <name>`, `Ship to:`, `NAME:`), then masked wherever they appear —
+  including the subject line. `NAME_STOPWORDS` blocks role words and document labels from
+  being learned as names, since a mislearned common word would be masked across the body.
+- Placeholders are stable per value (`[EMAIL_1]`, `[ADDRESS_2]`, ...), which preserves document
+  structure and coreference for the model.
+- `ParsedDocument.redaction_report` carries counts and placeholder names only — never the
+  original values.
+- Configure via `PIIPolicy` (per-category toggles, `preserve_sender_domain`, `extra_names`):
+  `EmlParser(pii_policy=PIIPolicy(mask_addresses=False))`. Disable entirely with
+  `EmlParser(redact_pii=False)` or `extract-eval --no-pii-redaction` (debugging only).
+- **Consequence:** `shipping_address`, `billing_address`, and `payment.last_four` are not
+  extractable from redacted text — the model returns null for them. No verifier scores those
+  fields (`FieldVerifier` covers vendor/order_id/dates/currency), so composite reward is
+  unaffected. Note that files in `annotations/` still hold the real values.
+- Order numbers, totals, dates, and product names are deliberately preserved: phone patterns
+  require digit-group separators, PAN masking requires a Luhn check, and `#1234`-style store
+  numbers and `&#8199;` HTML entities are excluded from card patterns.
 
 ## Commands
 
@@ -52,6 +87,9 @@ uv run extract-eval
 
 # Run with rollout capture for RLVR training
 uv run extract-eval --capture-rollouts
+
+# Run without PII masking (debugging only — sends raw text to the API)
+uv run extract-eval --no-pii-redaction
 
 # Run tests
 uv run pytest
@@ -92,4 +130,7 @@ Each annotation file in `annotations/` is a JSON file with a `_meta` key (source
 
 ## Testing
 
-35 tests covering schemas, parsers, and all verifiers. Tests run without API access (verifiers tested with synthetic data, parsers tested against actual .eml files in `invoices/`).
+64 tests covering schemas, parsers, PII redaction, and all verifiers. Tests run without API
+access (verifiers tested with synthetic data, parsers/redaction tested against synthetic text
+plus the actual .eml files in `invoices/`). `tests/test_pii.py` includes a leak test asserting
+the recipient's address never survives in any field of any sample document.

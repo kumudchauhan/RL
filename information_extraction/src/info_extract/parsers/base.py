@@ -19,6 +19,9 @@ class ParsedDocument:
     text_body: str
     html_body: str | None
     metadata: dict = field(default_factory=dict)
+    pii_redacted: bool = False
+    #: Counts/placeholders of masked PII — never the original values.
+    redaction_report: dict = field(default_factory=dict)
 
 
 class DocumentParser(ABC):
