@@ -38,10 +38,33 @@ description, the code if one is shown, the issuer if the document names one (e.g
 "manufacturer coupon"), and the amount or percentage as printed
 
 Order level:
+- vendor: the store/retailer the goods came from, as printed
+- service_provider: the platform that took or fulfilled the order, when the document names one \
+separately from the store (e.g. an Instacart or DoorDash order from a supermarket: vendor is \
+the supermarket, service_provider is Instacart/DoorDash). Null when the store billed directly
 - discounts: the same structure for discounts and coupons applied to the whole order
-- payment: method (credit_card, debit_card, gift_card, store_credit, apple_pay, google_pay, \
-paypal, venmo, cash, check, ebt, bank_transfer, other) and card_type, the card brand as \
-printed (Visa, Mastercard, AMEX, ...). Null for either if the document does not say
+
+Money — billed and paid are different questions, and both are asked:
+- subtotal: items before tax, fees, and shipping
+- total: the order/invoice total billed, exactly as printed
+- amount_paid: what the document says was actually paid or charged ("Total paid", "Amount \
+charged"). Leave it null if the document does not state it separately — never copy total into it
+- amount_due: any balance still outstanding, only if printed
+- Fees each have their own field when the document labels them: shipping_cost, delivery_fee, \
+service_fee, tip. Anything else the document charges (bag fee, bottle deposit, small order fee, \
+regulatory response fee) goes in fees[] with the label exactly as printed. Do not merge fees \
+together and do not move one into a field the document did not label that way
+
+Payments — one entry in payments[] per tender line the document shows:
+- method (credit_card, debit_card, gift_card, store_credit, apple_pay, google_pay, paypal, \
+venmo, cash, check, ebt, bank_transfer, buy_now_pay_later, other) and card_type, the card brand \
+as printed (Visa, Mastercard, AMEX, ...). Null for either if the document does not say
+- amount: what went onto that instrument, if a per-tender amount is printed. A split payment \
+(gift card plus a card, two cards, EBT plus debit) is several entries, not one
+- installment_count / installment_amount only when the document states an instalment or EMI \
+plan (e.g. "6 monthly payments of 49.99"). In that case amount is what was charged now, which \
+may be less than total — do not reconcile the two yourself
+- Leave payments[] empty if the document does not say how it was paid
 
 Personal data:
 - The schema has no field for a name, address, phone number, email address, or card number, \

@@ -1,4 +1,4 @@
-"""Verifier for scalar fields (vendor, order_id, dates, payment) using exact/fuzzy matching."""
+"""Verifier for scalar fields (vendor, service provider, order_id, dates) — exact/fuzzy match."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .base import VerificationResult, Verifier
 def resolve_field(obj: object, path: str) -> object | None:
     """Resolve a dotted field path, returning None if any step is missing.
 
-    Enum values are unwrapped to their string value so ``payment.method`` compares as
+    Enum values are unwrapped to their string value, so a ``PaymentMethod`` compares as
     ``"credit_card"`` rather than ``"PaymentMethod.CREDIT_CARD"``.
     """
     value: object | None = obj
@@ -27,14 +27,15 @@ def resolve_field(obj: object, path: str) -> object | None:
 class FieldVerifier(Verifier):
     """Verifies scalar string fields with exact/fuzzy matching."""
 
+    #: Payment is deliberately absent: it is a list of tender lines, so ``DetailVerifier``
+    #: scores it the way it scores the other repeated records.
     FIELDS: ClassVar[list[str]] = [
         "vendor",
+        "service_provider",
         "order_id",
         "order_date",
         "delivery_date",
         "currency",
-        "payment.method",
-        "payment.card_type",
     ]
 
     def __init__(self, fuzzy_threshold: float = 0.85):

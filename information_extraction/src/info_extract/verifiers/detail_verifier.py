@@ -1,10 +1,11 @@
-"""Verifier for the per-item detail a receipt prints beyond name, quantity, and total.
+"""Verifier for the repeated records a receipt prints beyond name, quantity, and total.
 
 ``LineItemVerifier`` answers "did the model find the right items?". This one answers "for the
 items it found, did it transcribe everything the document printed about them?" — identifiers
 (UPC, SKU, ASIN, product number), the taxonomy the document itself states (department,
-category), unit price and unit of measure, and per-item discounts/coupons. Order-level
-discounts are scored here too, since they are the same kind of evidence.
+category), unit price and unit of measure, and per-item discounts/coupons. The order-level
+records of the same shape are scored here too: discounts, fee lines, and the payment/tender
+lines, since a split-tender or instalment receipt prints several of each.
 
 Two deliberate asymmetries:
 
@@ -21,7 +22,7 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 from typing import ClassVar
 
-from ..schemas import Discount, InvoiceExtraction, LineItem, ProductIdentifier
+from ..schemas import Discount, Fee, InvoiceExtraction, LineItem, Payment, ProductIdentifier
 from .base import VerificationResult, Verifier
 from .line_item_verifier import LineItemVerifier
 
@@ -123,14 +124,15 @@ class DetailVerifier(Verifier):
             return 1.0
         return sum(s * w for s, w in weighted) / sum(w for _, w in weighted)
 
-    def _discount_list_score(self, preds: list[Discount], truths: list[Discount]) -> float:
-        """Greedy best-pairing of predicted discounts to annotated ones."""
+    def _greedy_list_score(self, preds: list, truths: list, score_fn) -> float:
+        """Greedy best-pairing of predicted records to annotated ones.
+
+        Dividing by ``max(len(preds), len(truths))`` means a missed record and an invented one
+        both cost, so a model cannot pad the list to look thorough.
+        """
         candidates = sorted(
-            (
-                (self._discount_score(p, t), i, j)
-                for i, p in enumerate(preds)
-                for j, t in enumerate(truths)
-            ),
+            ((score_fn(p, t), i, j) for i, p in enumerate(preds) for j, t in enumerate(truths)),
+            key=lambda candidate: candidate[0],
             reverse=True,
         )
         used_pred: set[int] = set()
@@ -143,6 +145,54 @@ class DetailVerifier(Verifier):
             used_true.add(j)
             total += score
         return total / max(len(preds), len(truths))
+
+    def _discount_list_score(self, preds: list[Discount], truths: list[Discount]) -> float:
+        return self._greedy_list_score(preds, truths, self._discount_score)
+
+    def _fee_score(self, pred: Fee, truth: Fee) -> float:
+        """The label identifies the fee: the right amount under the wrong label is not a match."""
+        label = self._fuzzy_score(pred.label, truth.label) if pred.label else 0.0
+        if label == 0.0 or truth.amount is None:
+            return label
+        amount = self._amount_score(pred.amount, truth.amount) if pred.amount is not None else 0.0
+        return 0.6 * label + 0.4 * amount
+
+    def _fee_list_score(self, preds: list[Fee], truths: list[Fee]) -> float:
+        return self._greedy_list_score(preds, truths, self._fee_score)
+
+    def _payment_score(self, pred: Payment, truth: Payment) -> float:
+        """Similarity of one tender line to another, over the parts the truth states."""
+        weighted: list[tuple[float, float]] = []
+        if truth.method is not None:
+            weighted.append((1.0 if pred.method == truth.method else 0.0, 0.4))
+        if truth.card_type is not None:
+            weighted.append(
+                (self._fuzzy_score(pred.card_type, truth.card_type) if pred.card_type else 0.0, 0.2)
+            )
+        if truth.amount is not None:
+            weighted.append(
+                (
+                    self._amount_score(pred.amount, truth.amount) if pred.amount is not None else 0.0,
+                    0.3,
+                )
+            )
+        if truth.installment_count is not None:
+            weighted.append((1.0 if pred.installment_count == truth.installment_count else 0.0, 0.2))
+        if truth.installment_amount is not None:
+            weighted.append(
+                (
+                    self._amount_score(pred.installment_amount, truth.installment_amount)
+                    if pred.installment_amount is not None
+                    else 0.0,
+                    0.2,
+                )
+            )
+        if not weighted:
+            return 1.0
+        return sum(s * w for s, w in weighted) / sum(w for _, w in weighted)
+
+    def _payment_list_score(self, preds: list[Payment], truths: list[Payment]) -> float:
+        return self._greedy_list_score(preds, truths, self._payment_score)
 
     # --- per-item scoring ---------------------------------------------------
 
@@ -223,16 +273,20 @@ class DetailVerifier(Verifier):
         for pred_idx, truth_idx, _ in matches:
             self._score_item(pred_items[pred_idx], true_items[truth_idx], slots, extras)
 
-        if not ground_truth.discounts:
-            if prediction.discounts:
-                extras["order_discounts"] = extras.get("order_discounts", 0) + 1
-        else:
-            slots.append(
-                (
-                    "order_discounts",
-                    self._discount_list_score(prediction.discounts, ground_truth.discounts),
-                )
-            )
+        # Order-level records of the same shape: discounts, fee lines, tender lines.
+        order_records = (
+            ("order_discounts", "discounts", self._discount_list_score),
+            ("fees", "fees", self._fee_list_score),
+            ("payments", "payments", self._payment_list_score),
+        )
+        for slot_name, attr, list_score in order_records:
+            true_records = getattr(ground_truth, attr)
+            pred_records = getattr(prediction, attr)
+            if not true_records:
+                if pred_records:
+                    extras[slot_name] = extras.get(slot_name, 0) + 1
+                continue
+            slots.append((slot_name, list_score(pred_records, true_records)))
 
         per_field: dict[str, dict[str, float]] = {}
         for field_name, score in slots:
@@ -255,7 +309,7 @@ class DetailVerifier(Verifier):
             "unmatched_ground_truth_items": max(0, len(true_items) - len(matches)),
         }
         if not slots:
-            details["note"] = "ground truth states no line-item detail or coupons"
+            details["note"] = "ground truth states no item detail, coupons, fees, or payments"
 
         return VerificationResult(
             verifier_name=self.name,

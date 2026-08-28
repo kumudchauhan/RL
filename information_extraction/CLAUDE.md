@@ -11,7 +11,7 @@ An information extraction pipeline that parses invoice emails and order confirma
 ```
 src/info_extract/
 ├── schemas.py              # Pydantic models: InvoiceExtraction, LineItem, ProductIdentifier,
-│                           #   Discount, PaymentInfo — PII-free by construction
+│                           #   Discount, Fee, Payment — PII-free by construction
 ├── parsers/
 │   ├── base.py             # ParsedDocument dataclass + DocumentParser ABC
 │   ├── eml_parser.py       # .eml → ParsedDocument (stdlib email + BeautifulSoup)
@@ -22,10 +22,10 @@ src/info_extract/
 │   └── extraction_agent.py # Claude API wrapper using forced tool-use for structured output
 ├── verifiers/
 │   ├── base.py             # Verifier ABC + VerificationResult
-│   ├── field_verifier.py   # Scalar fields (vendor, order_id, dates, payment.*) — exact/fuzzy
-│   ├── numeric_verifier.py # Monetary fields (total, tax, etc.) — tolerance-based
+│   ├── field_verifier.py   # Scalar fields (vendor, service_provider, order_id, dates) — fuzzy
+│   ├── numeric_verifier.py # Monetary fields (totals, fees, billed vs paid) — tolerance-based
 │   ├── line_item_verifier.py # Line items — greedy bipartite matching with F1
-│   ├── detail_verifier.py  # Per-matched-item detail — identifiers, taxonomy, unit price, coupons
+│   ├── detail_verifier.py  # Repeated records — identifiers, taxonomy, coupons, fees, tenders
 │   └── composite.py        # Weighted aggregation → RewardSignal
 ├── dataset/
 │   ├── loader.py           # Reads annotations/, prunes dropped fields, parses source docs
@@ -49,6 +49,16 @@ src/info_extract/
 - **Transcribe, never infer**: every schema field is optional, so anything the document does not
   print comes back `null`/`[]`. `currency` does *not* default to `"USD"`; a category is never
   derived from a product name; a missing quantity is never assumed to be 1.
+- **Billed, paid, and due are separate fields**, never derived from one another: `total` is what
+  the order was billed, `amount_paid` what changed hands, `amount_due` what is outstanding. On a
+  split tender, an instalment/EMI plan, or a partial gift-card payment these genuinely differ,
+  and a model that copies one into another is wrong in a way a single `total` field would hide.
+- **Store vs platform**: `vendor` is the retailer the goods came from; `service_provider` is the
+  platform that took or fulfilled the order (Instacart, DoorDash), and is null when the store
+  billed directly. Both are scored, so filing the platform as the store costs two fields.
+- **Fees stay separate**: `shipping_cost`, `delivery_fee`, `service_fee`, and `tip` each have a
+  field; anything else printed goes to `fees[]` with its label verbatim rather than being summed
+  into one of them.
 - **Report-don't-punish for unannotated detail**: `DetailVerifier` scores only values the ground
   truth states, and lists detail the model extracted beyond the annotation as
   `unverifiable_extras`.
@@ -163,20 +173,28 @@ Each annotation file in `annotations/` is a JSON file with a `_meta` key (source
 
 Existing annotations may still carry `shipping_address`, `billing_address`, `notes`, and
 `payment.last_four` from the v1 schema — the loader prunes those on load, so annotation files
-need no editing. Any *other* unrecognised key is a `ValueError`, which is deliberate: a typo in a
+need no editing. A v2 singular `payment` object is lifted into `payments[0]` by
+`migrate_annotation`, which prints what it renamed; annotations are never edited to follow a
+schema change. Any *other* unrecognised key is a `ValueError`, which is deliberate: a typo in a
 field name would otherwise silently score as "not annotated". Line-item detail
 (`upc`/`asin`/`department`/`discounts`/...) is optional per annotation; whatever is absent simply
 is not scored.
 
 ## Extraction Schema (fields extracted)
 
-- `vendor`, `order_id`, `order_date`, `delivery_date`, `currency`
-- `subtotal`, `tax`, `shipping_cost`, `discount`, `total`
+- `vendor` (the store/retailer), `service_provider` (Instacart/DoorDash-style platform, null if
+  the store billed directly), `order_id`, `order_date`, `delivery_date`, `currency`
+- money — `subtotal`, `tax`, `discount`, `total` (billed for the order), `amount_paid` (actually
+  paid, only if printed), `amount_due` (outstanding balance, only if printed)
+- fees — `shipping_cost`, `delivery_fee`, `service_fee`, `tip`, plus `fees[]`
+  (`Fee(label, amount)`) for any other printed charge, label verbatim
 - `discounts[]` (order level) — `Discount(description, code, source, amount, percentage)`, where
   `source` is the issuer as printed (`Groupon`, `manufacturer coupon`, ...)
-- `payment` — `method` (`PaymentMethod` enum: credit_card, debit_card, gift_card, store_credit,
-  apple_pay, google_pay, paypal, venmo, cash, check, ebt, bank_transfer, other) and `card_type`
-  (brand as printed). **No card number, no `last_four`.**
+- `payments[]` — one `Payment` per tender line: `method` (`PaymentMethod` enum: credit_card,
+  debit_card, gift_card, store_credit, apple_pay, google_pay, paypal, venmo, cash, check, ebt,
+  bank_transfer, buy_now_pay_later, other), `card_type` (brand as printed), `amount` charged to
+  that instrument, and `installment_count`/`installment_amount` when the document states an
+  instalment or EMI plan. **No card number, no `last_four`.**
 - `line_items[]`
   - `product_name`, `quantity` (float — weighed goods print `1.24 lb`), `quantity_unit`,
     `unit_price`, `total_price`
@@ -205,13 +223,14 @@ is not scored.
 
 ## Testing
 
-148 tests covering schemas, parsers, PII redaction, the dataset loader, and all verifiers. Tests
+170 tests covering schemas, parsers, PII redaction, the dataset loader, and all verifiers. Tests
 run without API access (verifiers tested with synthetic data, parsers/redaction tested against synthetic text
 plus the actual .eml and .pdf files in `invoices/`). `tests/test_pii.py` includes a leak test
 asserting the recipient's address never survives in any field of any sample document;
 `tests/test_schemas.py` asserts the schema and its generated JSON schema expose no PII-shaped
 property and that placeholders are scrubbed; `tests/test_loader.py` asserts a pruned annotation's
-ground truth serializes with no dropped value in it;
+ground truth serializes with no dropped value in it and that a v2 `payment` annotation still
+loads;
 `tests/test_pdf_parser.py` covers the PDF column-layout shapes and skips cleanly when pymupdf
 or the sample PDFs are absent.
 

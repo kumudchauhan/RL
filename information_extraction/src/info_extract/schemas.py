@@ -90,11 +90,17 @@ class PaymentMethod(str, Enum):
     CHECK = "check"
     EBT = "ebt"
     BANK_TRANSFER = "bank_transfer"
+    BUY_NOW_PAY_LATER = "buy_now_pay_later"
     OTHER = "other"
 
 
-class PaymentInfo(ExtractionModel):
-    """How the order was paid — never *who* paid, and never the card number.
+class Payment(ExtractionModel):
+    """One payment instrument the document says the order was paid with.
+
+    Orders split across instruments (gift card + credit card, two cards, EBT + debit) print one
+    of these per tender line, so :attr:`InvoiceExtraction.payments` is a list. ``amount`` is what
+    the document says went onto *this* instrument, which is why the sum can be less than the
+    order total — an instalment/EMI plan charges only the first instalment now.
 
     There is deliberately no ``last_four`` field: the card number is masked in the parser, and
     a field for it would only invite a masked or invented value into the output.
@@ -110,6 +116,36 @@ class PaymentInfo(ExtractionModel):
             "null if not printed"
         ),
     )
+    amount: float | None = Field(
+        None,
+        description=(
+            "Amount charged to this instrument, if the document prints a per-tender amount"
+        ),
+    )
+    installment_count: int | None = Field(
+        None,
+        description=(
+            "Number of instalments/EMIs, only if the document states a plan "
+            "(e.g. '6 monthly payments'); null otherwise"
+        ),
+    )
+    installment_amount: float | None = Field(
+        None, description="Amount of each instalment/EMI, only if printed"
+    )
+
+
+class Fee(ExtractionModel):
+    """A fee or surcharge line with no dedicated field, transcribed with its printed label.
+
+    Delivery platforms invent fee lines constantly ('Regulatory Response Fee', 'Small Order
+    Fee', 'Bag Fee', 'Bottle Deposit'). Rather than guess which dedicated field each belongs
+    in — or drop it — the label is kept verbatim.
+    """
+
+    label: str = Field(
+        ..., description="Fee label exactly as printed, e.g. 'Bag Fee', 'Bottle Deposit'"
+    )
+    amount: float | None = Field(None, description="Fee amount as printed")
 
 
 class ProductIdentifier(ExtractionModel):
@@ -199,7 +235,22 @@ class LineItem(ExtractionModel):
 class InvoiceExtraction(ExtractionModel):
     """Schema for extracted invoice / order-confirmation / receipt data."""
 
-    vendor: str = Field(..., description="Retailer or vendor name")
+    vendor: str = Field(
+        ...,
+        description=(
+            "The store/retailer the goods were bought from, as printed (e.g. 'Costco', "
+            "'Safeway'). For a marketplace or delivery order this is the store, not the "
+            "platform — the platform goes in service_provider"
+        ),
+    )
+    service_provider: str | None = Field(
+        None,
+        description=(
+            "Platform/marketplace that took or fulfilled the order, when the document names "
+            "one distinct from the store (e.g. 'Instacart', 'DoorDash', 'Uber Eats'); null if "
+            "the store billed directly"
+        ),
+    )
     order_id: str | None = Field(None, description="Order/confirmation/receipt number")
     order_date: str | None = Field(None, description="Date of order (ISO 8601: YYYY-MM-DD)")
     delivery_date: str | None = Field(
@@ -208,16 +259,51 @@ class InvoiceExtraction(ExtractionModel):
 
     line_items: list[LineItem] = Field(default_factory=list)
 
-    subtotal: float | None = Field(None, description="Subtotal before tax/shipping")
+    # --- money: billed and paid are separate questions ---
+    subtotal: float | None = Field(
+        None, description="Items subtotal before tax, fees, and shipping"
+    )
     tax: float | None = Field(None, description="Tax amount")
     shipping_cost: float | None = Field(None, description="Shipping cost")
+    delivery_fee: float | None = Field(
+        None, description="Delivery fee, when the document prints one separately from shipping"
+    )
+    service_fee: float | None = Field(
+        None, description="Service fee (platform/booking/convenience fee), if printed"
+    )
+    tip: float | None = Field(None, description="Tip/gratuity, if printed")
+    fees: list[Fee] = Field(
+        default_factory=list,
+        description="Any further fee/surcharge lines, with their labels exactly as printed",
+    )
     discount: float | None = Field(
         None, description="Order-level discount total as a positive value"
     )
     discounts: list[Discount] = Field(
         default_factory=list, description="Order-level discounts/coupons as printed"
     )
-    total: float = Field(..., description="Total amount charged")
+    total: float = Field(
+        ...,
+        description=(
+            "Total billed for the order — the invoice/order total as printed. Not necessarily "
+            "what was paid at checkout"
+        ),
+    )
+    amount_paid: float | None = Field(
+        None,
+        description=(
+            "Total actually paid/charged, if the document states it (e.g. 'Total paid', "
+            "'Amount charged'). Differs from total when payment is split across instruments, "
+            "part-covered by a gift card, or spread over instalments"
+        ),
+    )
+    amount_due: float | None = Field(
+        None,
+        description=(
+            "Balance still outstanding, only if the document prints one "
+            "(e.g. 'Balance due', remaining instalments)"
+        ),
+    )
     currency: str | None = Field(
         None,
         description=(
@@ -226,7 +312,13 @@ class InvoiceExtraction(ExtractionModel):
         ),
     )
 
-    payment: PaymentInfo | None = None
+    payments: list[Payment] = Field(
+        default_factory=list,
+        description=(
+            "One entry per payment instrument/tender line the document shows; empty if the "
+            "document does not say how it was paid"
+        ),
+    )
 
 
 def assert_pii_free_schema() -> None:
@@ -240,7 +332,8 @@ def assert_pii_free_schema() -> None:
         LineItem,
         ProductIdentifier,
         Discount,
-        PaymentInfo,
+        Fee,
+        Payment,
     ]
     offenders = [
         f"{model.__name__}.{field_name}"

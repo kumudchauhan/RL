@@ -6,9 +6,10 @@ from pydantic import BaseModel, ValidationError
 from info_extract.schemas import (
     FORBIDDEN_FIELD_FRAGMENTS,
     Discount,
+    Fee,
     InvoiceExtraction,
     LineItem,
-    PaymentInfo,
+    Payment,
     PaymentMethod,
     ProductIdentifier,
     assert_pii_free_schema,
@@ -19,7 +20,8 @@ MODELS: list[type[BaseModel]] = [
     LineItem,
     ProductIdentifier,
     Discount,
-    PaymentInfo,
+    Fee,
+    Payment,
 ]
 
 
@@ -72,18 +74,83 @@ class TestLineItem:
         assert item.quantity == pytest.approx(1.24)
 
 
-class TestPaymentInfo:
-    def test_method_and_card_type_optional(self):
-        payment = PaymentInfo()
+class TestPayment:
+    def test_everything_optional(self):
+        payment = Payment()
         assert payment.method is None
         assert payment.card_type is None
+        assert payment.amount is None
+        assert payment.installment_count is None
+        assert payment.installment_amount is None
 
     def test_wallet_methods_available(self):
-        assert PaymentInfo(method=PaymentMethod.APPLE_PAY).method == "apple_pay"
-        assert PaymentInfo(method=PaymentMethod.PAYPAL).method == "paypal"
+        assert Payment(method=PaymentMethod.APPLE_PAY).method == "apple_pay"
+        assert Payment(method=PaymentMethod.PAYPAL).method == "paypal"
+        assert Payment(method=PaymentMethod.BUY_NOW_PAY_LATER).method == "buy_now_pay_later"
 
     def test_no_card_number_field(self):
-        assert "last_four" not in PaymentInfo.model_fields
+        assert "last_four" not in Payment.model_fields
+
+    def test_split_tender_is_several_entries(self):
+        """A gift card covering part of the order is its own tender line."""
+        invoice = InvoiceExtraction(
+            vendor="Store",
+            total=100.00,
+            amount_paid=100.00,
+            payments=[
+                Payment(method=PaymentMethod.GIFT_CARD, amount=25.00),
+                Payment(method=PaymentMethod.CREDIT_CARD, card_type="Visa", amount=75.00),
+            ],
+        )
+        assert [p.amount for p in invoice.payments] == [25.00, 75.00]
+
+    def test_installment_plan_pays_less_than_billed(self):
+        """EMI: charged now is the instalment, not the order total — both are recorded."""
+        invoice = InvoiceExtraction(
+            vendor="Store",
+            total=299.94,
+            amount_paid=49.99,
+            amount_due=249.95,
+            payments=[
+                Payment(
+                    method=PaymentMethod.CREDIT_CARD,
+                    card_type="Visa",
+                    amount=49.99,
+                    installment_count=6,
+                    installment_amount=49.99,
+                )
+            ],
+        )
+        assert invoice.total != invoice.amount_paid
+        assert invoice.payments[0].installment_count == 6
+
+
+class TestFees:
+    def test_labelled_fees_have_their_own_fields(self):
+        invoice = InvoiceExtraction(
+            vendor="Corner Market",
+            service_provider="Instacart",
+            total=48.20,
+            subtotal=38.00,
+            tax=2.20,
+            delivery_fee=3.99,
+            service_fee=2.01,
+            tip=2.00,
+        )
+        assert invoice.delivery_fee == 3.99
+        assert invoice.service_fee == 2.01
+        assert invoice.tip == 2.00
+
+    def test_unlabelled_fees_keep_their_printed_label(self):
+        invoice = InvoiceExtraction(
+            vendor="Corner Market",
+            total=10.35,
+            fees=[Fee(label="Bag Fee", amount=0.10), Fee(label="Bottle Deposit", amount=0.25)],
+        )
+        assert [f.label for f in invoice.fees] == ["Bag Fee", "Bottle Deposit"]
+
+    def test_fee_amount_optional(self):
+        assert Fee(label="Small Order Fee").amount is None
 
 
 class TestNoPIIInSchema:
@@ -127,7 +194,7 @@ class TestNoPIIInSchema:
     def test_unknown_field_is_rejected(self):
         """extra='forbid' is what stops a removed field from sneaking back in."""
         with pytest.raises(ValidationError):
-            PaymentInfo(method=PaymentMethod.CREDIT_CARD, last_four="4242")
+            Payment(method=PaymentMethod.CREDIT_CARD, last_four="4242")
         with pytest.raises(ValidationError):
             InvoiceExtraction(
                 vendor="X",
@@ -171,7 +238,11 @@ class TestInvoiceExtraction:
         assert invoice.line_items == []
         assert invoice.discounts == []
         assert invoice.order_id is None
-        assert invoice.payment is None
+        assert invoice.service_provider is None
+        assert invoice.payments == []
+        assert invoice.fees == []
+        assert invoice.amount_paid is None  # not stated -> not copied from total
+        assert invoice.amount_due is None
 
     def test_full(self):
         invoice = InvoiceExtraction(
@@ -189,11 +260,12 @@ class TestInvoiceExtraction:
             discounts=[Discount(description="SPRING10", code="SPRING10", amount=1.00)],
             total=26.79,
             currency="USD",
-            payment=PaymentInfo(method=PaymentMethod.CREDIT_CARD, card_type="Visa"),
+            amount_paid=26.79,
+            payments=[Payment(method=PaymentMethod.CREDIT_CARD, card_type="Visa", amount=26.79)],
         )
         assert len(invoice.line_items) == 1
         assert invoice.total == 26.79
-        assert invoice.payment.card_type == "Visa"
+        assert invoice.payments[0].card_type == "Visa"
 
     def test_json_schema_generation(self):
         schema = InvoiceExtraction.model_json_schema()

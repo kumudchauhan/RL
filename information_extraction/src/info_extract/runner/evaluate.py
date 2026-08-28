@@ -16,10 +16,10 @@ from ..verifiers.composite import CompositeVerifier
 
 #: What each reward component measures, for the report's explanation block.
 COMPONENT_DESCRIPTIONS = {
-    "field_accuracy": "easiest: vendor, dates, IDs, payment method",
-    "numeric_accuracy": "harder: must be exact to the cent",
+    "field_accuracy": "easiest: vendor, service provider, dates, IDs",
+    "numeric_accuracy": "harder: totals, fees, billed vs paid, exact to the cent",
     "line_item_f1": "hard: name + quantity + total, matched per item",
-    "detail_accuracy": "hardest: identifiers, taxonomy, coupons",
+    "detail_accuracy": "hardest: identifiers, taxonomy, coupons, fees, tenders",
 }
 
 
@@ -215,14 +215,14 @@ class EvaluationRunner:
                     w(f"    x {num_gt - num_matched} missing ground truth item(s)")
                 w("")
 
-            # Line-item detail: identifiers, taxonomy, unit price, coupons
+            # Detail: identifiers, taxonomy, unit price, coupons, fee and tender lines
             detail_meta = metadata.get("detail_accuracy", {})
             detail_details = detail_meta.get("details", {})
             if detail_details:
                 scored_slots = detail_details.get("scored_slots", 0)
                 if scored_slots:
                     w(
-                        f"  Detail (identifiers/taxonomy/coupons): "
+                        f"  Detail (identifiers/taxonomy/coupons/fees/payments): "
                         f"{detail_meta.get('normalized', 0):.3f} "
                         f"over {scored_slots} annotated value(s)"
                     )
@@ -231,7 +231,7 @@ class EvaluationRunner:
                         mark = "+" if score >= 0.99 else ("~" if score > 0 else "x")
                         w(f"    {mark} {fname:<20} {score:.2f}  ({info['slots']} annotated)")
                 else:
-                    w("  Detail (identifiers/taxonomy/coupons): nothing annotated to check")
+                    w("  Detail (identifiers/taxonomy/coupons/fees/payments): nothing annotated")
                 extras = detail_details.get("unverifiable_extras", {})
                 if extras:
                     extra_str = ", ".join(f"{k} x{v}" for k, v in sorted(extras.items()))

@@ -9,7 +9,12 @@ import json
 
 import pytest
 
-from info_extract.dataset.loader import DatasetLoader, prune_annotation, unexpected_keys
+from info_extract.dataset.loader import (
+    DatasetLoader,
+    migrate_annotation,
+    prune_annotation,
+    unexpected_keys,
+)
 
 EML_SOURCE = (
     "From: Store <orders@vendor.example>\r\n"
@@ -65,23 +70,49 @@ class TestPruneAnnotation:
         assert "_meta" not in dropped
 
 
+class TestMigrateAnnotation:
+    def test_single_payment_becomes_a_one_entry_list(self):
+        """v2 annotations recorded one payment; a split-tender order needs a list."""
+        pruned, _ = prune_annotation(ANNOTATION)
+        migrated, notes = migrate_annotation(pruned)
+        assert "payment" not in migrated
+        assert migrated["payments"] == [{"method": "credit_card", "card_type": "Visa"}]
+        assert notes == ["payment -> payments[0]"]
+
+    def test_already_current_annotation_is_untouched(self):
+        data = {"vendor": "Store", "total": 1.0, "payments": [{"method": "cash"}]}
+        migrated, notes = migrate_annotation(data)
+        assert migrated == data
+        assert notes == []
+
+    def test_card_number_is_pruned_from_a_payments_list(self):
+        pruned, dropped = prune_annotation(
+            {"vendor": "Store", "total": 1.0, "payments": [{"method": "cash", "last_four": "4321"}]}
+        )
+        assert pruned["payments"] == [{"method": "cash"}]
+        assert dropped == ["payments[0].last_four"]
+
+
 class TestUnexpectedKeys:
     def test_clean_annotation_has_none(self):
         pruned, _ = prune_annotation(ANNOTATION)
-        assert unexpected_keys(pruned) == []
+        migrated, _ = migrate_annotation(pruned)
+        assert unexpected_keys(migrated) == []
 
     def test_reports_nested_paths(self):
         data = {
             "vendor": "Store",
             "total": 1.0,
             "mystery": 1,
-            "payment": {"method": "cash", "wallet_id": "x"},
+            "payments": [{"method": "cash", "wallet_id": "x"}],
+            "fees": [{"label": "Bag Fee", "waived": True}],
             "line_items": [{"product_name": "Thing", "shelf": "A3"}],
         }
         assert sorted(unexpected_keys(data)) == [
+            "fees[0].waived",
             "line_items[0].shelf",
             "mystery",
-            "payment.wallet_id",
+            "payments[0].wallet_id",
         ]
 
 
@@ -101,7 +132,7 @@ class TestLoadTasks:
 
         dumped = tasks[0].ground_truth.model_dump()
         assert set(dumped) & {"shipping_address", "billing_address", "notes"} == set()
-        assert "last_four" not in dumped["payment"]
+        assert "last_four" not in dumped["payments"][0]
         serialized = json.dumps(dumped)
         assert "Jane" not in serialized
         assert "123 Main St" not in serialized
@@ -110,6 +141,31 @@ class TestLoadTasks:
     def test_new_line_item_detail_loads(self, tmp_path):
         tasks = self._write_corpus(tmp_path, ANNOTATION).load_tasks()
         assert tasks[0].ground_truth.line_items[0].upc == "012345678905"
+
+    def test_v2_payment_annotation_still_loads(self, tmp_path):
+        """Annotations are never edited to follow a schema change; the loader adapts."""
+        tasks = self._write_corpus(tmp_path, ANNOTATION).load_tasks()
+        payments = tasks[0].ground_truth.payments
+        assert [p.method for p in payments] == ["credit_card"]
+        assert payments[0].card_type == "Visa"
+
+    def test_v3_envelope_fields_load(self, tmp_path):
+        annotation = {
+            **ANNOTATION,
+            "service_provider": "Instacart",
+            "delivery_fee": 3.99,
+            "service_fee": 2.01,
+            "tip": 2.00,
+            "fees": [{"label": "Bag Fee", "amount": 0.10}],
+            "amount_paid": 15.00,
+            "amount_due": 4.99,
+        }
+        ground_truth = self._write_corpus(tmp_path, annotation).load_tasks()[0].ground_truth
+        assert ground_truth.service_provider == "Instacart"
+        assert ground_truth.delivery_fee == 3.99
+        assert ground_truth.fees[0].label == "Bag Fee"
+        assert ground_truth.amount_paid == 15.00
+        assert ground_truth.amount_due == 4.99
 
     def test_template_annotations_are_skipped(self, tmp_path):
         loader = self._write_corpus(tmp_path, ANNOTATION)

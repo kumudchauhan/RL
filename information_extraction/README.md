@@ -6,12 +6,12 @@ Structured data extraction from invoice emails and order confirmations using Cla
 
 |  |  |
 |---|---|
-| **What** | Parses `.eml` and `.pdf` invoices, then extracts vendor, order, totals, and fully detailed line items as schema-valid JSON via Claude tool-use |
+| **What** | Parses `.eml` and `.pdf` invoices, then extracts store and platform, order, billed-vs-paid totals, fees, tender lines, and fully detailed line items as schema-valid JSON via Claude tool-use |
 | **Why** | Turns extraction quality into a *verifiable, granular reward* — the signal an RLVR training loop would need |
 | **How it's scored** | Weighted composite: field 0.20 · numeric 0.30 · line-item F1 0.35 · line-item detail 0.15 |
 | **Privacy** | Two-tier PII masking inside the parser, plus an output schema with no field for a name, address, phone, email, or card number — so there is nothing to leak, masked or otherwise |
 | **Status** | Evaluation and verifier framework works end to end; policy optimization not yet implemented |
-| **Stack** | Python 3.11+, uv, `anthropic`, Pydantic, pymupdf; 148 tests that run with no API key |
+| **Stack** | Python 3.11+, uv, `anthropic`, Pydantic, pymupdf; 170 tests that run with no API key |
 
 **Contents** — [Current state](#current-project-state) · [Not yet implemented](#not-yet-implemented) ·
 [Next milestone](#next-technical-milestone) · [Setup](#setup) · [Usage](#usage) ·
@@ -57,12 +57,22 @@ Concretely, that means answering:
 Input is a raw `.eml` order confirmation or a `.pdf` receipt. Output is an `InvoiceExtraction`
 (see `schemas.py`), so every prediction is validated on arrival:
 
-- **Document** — vendor, order id, order date, delivery date, currency
-- **Money** — subtotal, tax, shipping cost, discount, total
+- **Document** — `vendor` (the store the goods came from), `service_provider` (the platform that
+  took or fulfilled the order, when the document names one — Instacart, DoorDash), order id,
+  order date, delivery date, currency
+- **Money, billed and paid kept apart** — `subtotal`, `tax`, `discount`, `total` (what the order
+  was billed), `amount_paid` (what actually changed hands), `amount_due` (what is still
+  outstanding). They diverge on a split-tender or instalment receipt, so none is derived from
+  another
+- **Fees, each on its own line** — `shipping_cost`, `delivery_fee`, `service_fee`, `tip`, plus
+  `fees[{label, amount}]` for whatever else the document charges (`Bag Fee`, `Bottle Deposit`,
+  `Small Order Fee`) with the label kept as printed
 - **Discounts and coupons** (order level and per line) — printed description, code, issuer
   (`Groupon`, `manufacturer coupon`, ...), amount, percentage
-- **Payment** — method (`credit_card`, `debit_card`, `apple_pay`, `google_pay`, `paypal`,
-  `gift_card`, `cash`, `ebt`, ...) and card brand as printed
+- **Payment** — `payments[]`, one entry per tender line: method (`credit_card`, `debit_card`,
+  `apple_pay`, `google_pay`, `paypal`, `gift_card`, `ebt`, `buy_now_pay_later`, ...), card brand
+  as printed, the amount that went onto that instrument, and `installment_count` /
+  `installment_amount` when the document states an instalment or EMI plan
 - **Line items**
   - product name, quantity (fractional allowed, e.g. `1.24 lb`), unit of measure,
     unit price, line total
@@ -167,15 +177,15 @@ uv run extract-eval --no-pii-redaction
 | `parsers/eml_parser.py` | `.eml` → text/HTML body, subject, sender, headers | `EmlParser` |
 | `parsers/pdf_parser.py` | `.pdf` text layer via pymupdf (lazy import, optional extra) | `PdfParser` |
 | `parsers/pii.py` | Two-tier PII masking with stable placeholders, one redactor per document | `PIIPolicy`, `PIIRedactor` |
-| `dataset/loader.py` | Match each source document to its annotation, prune annotation fields the schema drops, build the eval set | `DatasetLoader`, `prune_annotation` |
+| `dataset/loader.py` | Match each source document to its annotation, prune dropped fields, migrate older annotation shapes, build the eval set | `DatasetLoader`, `prune_annotation`, `migrate_annotation` |
 | `dataset/tasks.py` | One evaluation instance; serializes to Harbor task format | `ExtractionTask` |
 | `agent/prompts.py` | System + user prompt templates | — |
 | `agent/extraction_agent.py` | Claude call with `tool_choice={"type": "tool", ...}`; rollout capture | `ExtractionAgent` |
 | `verifiers/base.py` | Verifier interface and normalized scoring | `Verifier`, `VerificationResult` |
-| `verifiers/field_verifier.py` | Scalar fields, incl. `payment.method`/`payment.card_type` — exact and fuzzy match | `FieldVerifier` |
-| `verifiers/numeric_verifier.py` | Monetary fields — tolerance-based comparison | `NumericVerifier` |
+| `verifiers/field_verifier.py` | Scalar fields — vendor, service provider, order id, dates, currency — exact and fuzzy match | `FieldVerifier` |
+| `verifiers/numeric_verifier.py` | Monetary fields, incl. each fee and billed vs paid — tolerance-based comparison | `NumericVerifier` |
 | `verifiers/line_item_verifier.py` | Line items — greedy bipartite matching on name/quantity/total, weighted F1 | `LineItemVerifier` |
-| `verifiers/detail_verifier.py` | Per-item detail on matched items — identifiers, taxonomy, unit price, coupons | `DetailVerifier` |
+| `verifiers/detail_verifier.py` | Repeated records — per-item identifiers, taxonomy, unit price, coupons, plus order-level fee and tender lines | `DetailVerifier` |
 | `verifiers/composite.py` | Weighted aggregation into a single training signal | `CompositeVerifier`, `RewardSignal` |
 | `runner/evaluate.py` | Harness + `extract-eval` CLI; writes JSON results and the text report | `EvaluationRunner` |
 
@@ -269,10 +279,10 @@ export INFO_EXTRACT_PII_NAMES="Jane Q Doe,J Doe"
 
 | Verifier | Weight | Difficulty |
 |----------|--------|------------|
-| Field accuracy (fuzzy string) | 0.20 | Easiest — vendor, dates, IDs, payment method and card brand |
-| Numeric accuracy (tolerance) | 0.30 | Harder — must be exact to the cent |
+| Field accuracy (fuzzy string) | 0.20 | Easiest — vendor, service provider, dates, IDs |
+| Numeric accuracy (tolerance) | 0.30 | Harder — every fee and total, exact to the cent, billed kept apart from paid |
 | Line item F1 (greedy match) | 0.35 | Hard — name + quantity + line total, matched item by item |
-| Detail accuracy (per matched item) | 0.15 | Hardest — UPC/SKU/ASIN/product number, printed taxonomy, unit price, coupons |
+| Detail accuracy (repeated records) | 0.15 | Hardest — UPC/SKU/ASIN/product number, printed taxonomy, unit price, coupons, fee lines, tender lines |
 
 The weights are deliberate: the hardest signal carries the most reward, so a model cannot look
 good by getting only the easy fields right. Override them with
@@ -284,33 +294,45 @@ have scored, for comparison.
 After each evaluation run, a human-readable report is generated (`results/report_*.txt`) that includes:
 
 - **Per-task field breakdown** — every field scored with `+` (correct), `~` (partial), `x` (wrong) alongside predicted vs expected values
-- **Line-item detail breakdown** — per identifier/taxonomy/coupon field: how many values the annotation states and how many were transcribed, plus a count of detail the model extracted that the annotation does not yet cover (reported, never scored)
+- **Detail breakdown** — per identifier/taxonomy/coupon/fee/tender field: how many values the annotation states and how many were transcribed, plus a count of detail the model extracted that the annotation does not yet cover (reported, never scored)
 - **Equal vs weighted scoring comparison** — side-by-side table showing how uniform weighting compares to the actual weighted scoring, over the same set of applicable components
 - **Explanation of why weighted scoring matters** — equal weighting inflates scores by over-crediting easy fields; weighted scoring reflects real-world extraction difficulty
 
 Example excerpt:
 
 ```
-  Detail (identifiers/taxonomy/coupons): 0.778 over 9 annotated value(s)
-    + category             1.00  (1 annotated)
+  Field Accuracy:
+    x vendor           0.00  (pred: "Instacart")
+    x service_provider 0.00  (pred: None)
+    + order_id         1.00  (pred: "IC-77")
+
+  Numeric Accuracy:
+    + delivery_fee     1.00  (pred: $3.99, expected: $3.99)
+    + total            1.00  (pred: $51.30, expected: $51.30)
+    x amount_paid      0.00  (pred: None, expected: $51.30)
+
+  Detail (identifiers/taxonomy/coupons/fees/payments): 0.732 over 6 annotated value(s)
     + department           1.00  (1 annotated)
-    + sku                  1.00  (1 annotated)
-    + unit_price           1.00  (2 annotated)
-    x upc                  0.00  (1 annotated)
-    x other_identifiers    0.00  (1 annotated)
-    i extracted but not annotated (unscored): asin x1
+    x fees                 0.00  (1 annotated)
+    + other_identifiers    1.00  (1 annotated)
+    ~ payments             0.39  (1 annotated)
+    i extracted but not annotated (unscored): category x1
 
   Task                         Equal (0.25 each)    Weighted (0.20/0.30/0.35/0.15)
   ---------------------------- -------------------- --------------------
-  email_order_sample             0.9421               0.9638
-  pdf_receipt_sample             0.7100               0.6575
+  instacart_split_tender         0.7973               0.8370
   ---------------------------- -------------------- --------------------
-  MEAN                           0.8261               0.8107
+  MEAN                           0.7973               0.8370
 ```
+
+That excerpt is a delivery order the model got mostly right and misread in the ways this schema
+exists to catch: it filed the platform as the store, collapsed a gift-card-plus-Visa split into
+one payment, dropped a labelled fee line, and inferred a `category` the receipt never printed
+(reported, not scored).
 
 ## Run Tests
 
-148 tests cover the schema, both parsers, PII redaction, the annotation loader, and every
+170 tests cover the schema, both parsers, PII redaction, the annotation loader, and every
 verifier. No API key and no
 network access required — verifiers run on synthetic extractions and redaction is tested against
 synthetic documents, so a fresh clone is green.

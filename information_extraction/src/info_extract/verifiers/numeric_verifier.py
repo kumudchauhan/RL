@@ -9,9 +9,25 @@ from .base import VerificationResult, Verifier
 
 
 class NumericVerifier(Verifier):
-    """Verifies numeric fields (subtotal, tax, shipping, total) with tolerance."""
+    """Verifies the order's monetary fields with tolerance.
 
-    FIELDS: ClassVar[list[str]] = ["subtotal", "tax", "shipping_cost", "discount", "total"]
+    Billed and paid are scored as separate fields on purpose: ``total`` is what the document
+    says the order came to, ``amount_paid``/``amount_due`` are what actually changed hands.
+    Getting one right says nothing about the other on a split-tender or instalment receipt.
+    """
+
+    FIELDS: ClassVar[list[str]] = [
+        "subtotal",
+        "tax",
+        "shipping_cost",
+        "delivery_fee",
+        "service_fee",
+        "tip",
+        "discount",
+        "total",
+        "amount_paid",
+        "amount_due",
+    ]
 
     def __init__(self, tolerance: float = 0.01):
         """tolerance: absolute dollar amount tolerance (default 1 cent)."""

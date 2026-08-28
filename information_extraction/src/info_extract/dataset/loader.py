@@ -8,7 +8,7 @@ from pathlib import Path
 from ..parsers.base import DocumentParser
 from ..parsers.eml_parser import EmlParser
 from ..parsers.pdf_parser import PdfParser
-from ..schemas import InvoiceExtraction, LineItem, PaymentInfo
+from ..schemas import Fee, InvoiceExtraction, LineItem, Payment
 from .tasks import ExtractionTask
 
 #: Annotation keys the extraction schema deliberately no longer carries. Annotations are the
@@ -38,9 +38,40 @@ def prune_annotation(data: dict) -> tuple[dict, list[str]]:
             dropped.extend(f"payment.{k}" for k in value if k in DROPPED_PAYMENT_KEYS)
             pruned[key] = {k: v for k, v in value.items() if k not in DROPPED_PAYMENT_KEYS}
             continue
+        if key == "payments" and isinstance(value, list):
+            cleaned = []
+            for index, entry in enumerate(value):
+                if not isinstance(entry, dict):
+                    cleaned.append(entry)
+                    continue
+                dropped.extend(
+                    f"payments[{index}].{k}" for k in entry if k in DROPPED_PAYMENT_KEYS
+                )
+                cleaned.append({k: v for k, v in entry.items() if k not in DROPPED_PAYMENT_KEYS})
+            pruned[key] = cleaned
+            continue
         pruned[key] = value
 
     return pruned, dropped
+
+
+def migrate_annotation(data: dict) -> tuple[dict, list[str]]:
+    """Bring an older annotation up to the current schema shape, losslessly.
+
+    An order can be split across tenders (gift card + card, instalments), so ``payment`` became
+    the list ``payments``. Annotations are not edited for that: a single ``payment`` object is
+    lifted into a one-entry list here, and the rename is reported so the run says what it did.
+    """
+    migrated = dict(data)
+    notes: list[str] = []
+
+    payment = migrated.pop("payment", None)
+    if isinstance(payment, dict) and payment:
+        existing = migrated.get("payments") or []
+        migrated["payments"] = [payment, *existing]
+        notes.append("payment -> payments[0]")
+
+    return migrated, notes
 
 
 def unexpected_keys(data: dict) -> list[str]:
@@ -50,19 +81,15 @@ def unexpected_keys(data: dict) -> list[str]:
     """
     unknown = [key for key in data if key not in InvoiceExtraction.model_fields]
 
-    payment = data.get("payment")
-    if isinstance(payment, dict):
-        unknown.extend(
-            f"payment.{key}" for key in payment if key not in PaymentInfo.model_fields
-        )
-
-    for index, item in enumerate(data.get("line_items") or []):
-        if isinstance(item, dict):
-            unknown.extend(
-                f"line_items[{index}].{key}"
-                for key in item
-                if key not in LineItem.model_fields
-            )
+    nested_lists = (("payments", Payment), ("fees", Fee), ("line_items", LineItem))
+    for field_name, model in nested_lists:
+        for index, entry in enumerate(data.get(field_name) or []):
+            if isinstance(entry, dict):
+                unknown.extend(
+                    f"{field_name}[{index}].{key}"
+                    for key in entry
+                    if key not in model.model_fields
+                )
 
     return unknown
 
@@ -102,6 +129,7 @@ class DatasetLoader:
 
             # Build ground truth from the fields the schema still carries
             gt_data, dropped = prune_annotation(data)
+            gt_data, migrations = migrate_annotation(gt_data)
             unknown = unexpected_keys(gt_data)
             if unknown:
                 raise ValueError(
@@ -111,6 +139,8 @@ class DatasetLoader:
                 )
             if dropped:
                 print(f"  {annotation_file.name}: not loaded: {', '.join(sorted(dropped))}")
+            if migrations:
+                print(f"  {annotation_file.name}: migrated: {', '.join(sorted(migrations))}")
             ground_truth = InvoiceExtraction(**gt_data)
 
             # Parse the source document

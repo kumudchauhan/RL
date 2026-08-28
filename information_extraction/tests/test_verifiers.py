@@ -4,9 +4,10 @@ import pytest
 
 from info_extract.schemas import (
     Discount,
+    Fee,
     InvoiceExtraction,
     LineItem,
-    PaymentInfo,
+    Payment,
     PaymentMethod,
     ProductIdentifier,
 )
@@ -63,41 +64,33 @@ class TestFieldVerifier:
         result = self.verifier.verify(pred, truth)
         assert result.normalized_score == 1.0
 
-    def test_payment_fields_are_scored(self):
+    def test_service_provider_is_scored_separately_from_the_store(self):
+        """A delivery order names both: the store sold it, the platform delivered it."""
         pred = InvoiceExtraction(
-            vendor="X",
-            total=50.0,
-            payment=PaymentInfo(method=PaymentMethod.APPLE_PAY, card_type="Visa"),
+            vendor="Corner Market", service_provider="Instacart", total=50.0
         )
         truth = InvoiceExtraction(
-            vendor="X",
-            total=50.0,
-            payment=PaymentInfo(method=PaymentMethod.APPLE_PAY, card_type="Visa"),
+            vendor="Corner Market", service_provider="Instacart", total=50.0
         )
         result = self.verifier.verify(pred, truth)
-        # the enum compares by value, not by "PaymentMethod.APPLE_PAY"
-        assert result.details["payment.method"]["pred"] == "apple_pay"
-        assert result.details["payment.card_type"]["score"] == 1.0
+        assert result.max_score == 2.0
         assert result.normalized_score == 1.0
 
-    def test_wrong_payment_method_costs_a_field(self):
-        pred = InvoiceExtraction(
-            vendor="X", total=50.0, payment=PaymentInfo(method=PaymentMethod.DEBIT_CARD)
-        )
+    def test_platform_mistaken_for_the_store_costs_both_fields(self):
+        pred = InvoiceExtraction(vendor="Instacart", service_provider="Corner Market", total=50.0)
         truth = InvoiceExtraction(
-            vendor="X", total=50.0, payment=PaymentInfo(method=PaymentMethod.CREDIT_CARD)
+            vendor="Corner Market", service_provider="Instacart", total=50.0
         )
         result = self.verifier.verify(pred, truth)
-        assert result.details["payment.method"]["score"] == 0.0
-        assert result.max_score == 2.0  # vendor + payment.method
+        assert result.details["vendor"]["score"] == 0.0
+        assert result.details["service_provider"]["score"] == 0.0
 
-    def test_missing_payment_object_is_not_scored(self):
-        pred = InvoiceExtraction(
-            vendor="X", total=50.0, payment=PaymentInfo(method=PaymentMethod.CASH)
-        )
+    def test_unstated_service_provider_is_not_scored(self):
+        """A store that billed directly has no platform — inventing one is not punished here."""
+        pred = InvoiceExtraction(vendor="X", service_provider="Instacart", total=50.0)
         truth = InvoiceExtraction(vendor="X", total=50.0)
         result = self.verifier.verify(pred, truth)
-        assert "payment.method" not in result.details
+        assert "service_provider" not in result.details
         assert result.normalized_score == 1.0
 
     def test_nothing_to_verify_is_not_applicable(self):
@@ -142,6 +135,43 @@ class TestNumericVerifier:
         pred = InvoiceExtraction(vendor="X", total=100.00, tax=5.00)
         truth = InvoiceExtraction(vendor="X", total=100.00)
         result = self.verifier.verify(pred, truth)
+        assert result.normalized_score == 1.0
+
+    def test_each_fee_is_its_own_field(self):
+        """Delivery, service, and tip are separate charges, so each is separately scored."""
+        truth = InvoiceExtraction(
+            vendor="X", total=48.20, delivery_fee=3.99, service_fee=2.01, tip=2.00
+        )
+        pred = InvoiceExtraction(
+            vendor="X", total=48.20, delivery_fee=3.99, service_fee=2.01, tip=0.00
+        )
+        result = self.verifier.verify(pred, truth)
+        assert result.max_score == 4.0
+        assert result.details["delivery_fee"]["score"] == 1.0
+        assert result.details["tip"]["score"] == 0.0
+
+    def test_fees_lumped_into_one_field_scores_badly(self):
+        """A model that adds the fees together gets neither field right."""
+        truth = InvoiceExtraction(vendor="X", total=10.0, delivery_fee=3.99, service_fee=2.01)
+        pred = InvoiceExtraction(vendor="X", total=10.0, delivery_fee=6.00, service_fee=0.0)
+        result = self.verifier.verify(pred, truth)
+        assert result.details["delivery_fee"]["score"] < 0.6
+        assert result.details["service_fee"]["score"] == 0.0
+
+    def test_billed_and_paid_are_scored_independently(self):
+        """Split tender: the order was billed 100 but only 75 hit the card."""
+        truth = InvoiceExtraction(vendor="X", total=100.00, amount_paid=75.00)
+        pred = InvoiceExtraction(vendor="X", total=100.00, amount_paid=100.00)
+        result = self.verifier.verify(pred, truth)
+        assert result.details["total"]["score"] == 1.0
+        assert result.details["amount_paid"]["score"] < 1.0
+
+    def test_installment_balance_is_scored(self):
+        truth = InvoiceExtraction(
+            vendor="X", total=299.94, amount_paid=49.99, amount_due=249.95
+        )
+        result = self.verifier.verify(truth, truth)
+        assert result.max_score == 3.0
         assert result.normalized_score == 1.0
 
 
@@ -388,6 +418,98 @@ class TestDetailVerifier:
         pred = InvoiceExtraction(vendor="X", total=10.0, discounts=[coupon.model_copy()])
         result = self.verifier.verify(pred, truth)
         assert result.details["per_field"]["order_discounts"]["score"] == 1.0
+
+    def test_fee_lines_are_scored_on_label_and_amount(self):
+        fees = [Fee(label="Bag Fee", amount=0.10), Fee(label="Bottle Deposit", amount=0.25)]
+        truth = InvoiceExtraction(vendor="X", total=10.0, fees=fees)
+        pred = InvoiceExtraction(vendor="X", total=10.0, fees=[f.model_copy() for f in fees])
+        result = self.verifier.verify(pred, truth)
+        assert result.details["per_field"]["fees"]["score"] == 1.0
+
+    def test_fee_amount_on_the_wrong_label_is_not_a_match(self):
+        truth = InvoiceExtraction(vendor="X", total=10.0, fees=[Fee(label="Bag Fee", amount=0.10)])
+        pred = InvoiceExtraction(
+            vendor="X", total=10.0, fees=[Fee(label="Bottle Deposit", amount=0.10)]
+        )
+        assert self.verifier.verify(pred, truth).normalized_score == 0.0
+
+    def test_missed_fee_line_costs_score(self):
+        truth = InvoiceExtraction(
+            vendor="X",
+            total=10.0,
+            fees=[Fee(label="Bag Fee", amount=0.10), Fee(label="Small Order Fee", amount=1.99)],
+        )
+        pred = InvoiceExtraction(vendor="X", total=10.0, fees=[Fee(label="Bag Fee", amount=0.10)])
+        assert self.verifier.verify(pred, truth).normalized_score == pytest.approx(0.5)
+
+    def test_split_tender_scored_per_payment(self):
+        payments = [
+            Payment(method=PaymentMethod.GIFT_CARD, amount=25.00),
+            Payment(method=PaymentMethod.CREDIT_CARD, card_type="Visa", amount=75.00),
+        ]
+        truth = InvoiceExtraction(vendor="X", total=100.0, payments=payments)
+        pred = InvoiceExtraction(
+            vendor="X", total=100.0, payments=[p.model_copy() for p in payments]
+        )
+        result = self.verifier.verify(pred, truth)
+        assert result.details["per_field"]["payments"]["score"] == 1.0
+
+    def test_collapsing_a_split_payment_into_one_costs_score(self):
+        truth = InvoiceExtraction(
+            vendor="X",
+            total=100.0,
+            payments=[
+                Payment(method=PaymentMethod.GIFT_CARD, amount=25.00),
+                Payment(method=PaymentMethod.CREDIT_CARD, amount=75.00),
+            ],
+        )
+        pred = InvoiceExtraction(
+            vendor="X",
+            total=100.0,
+            payments=[Payment(method=PaymentMethod.CREDIT_CARD, amount=100.00)],
+        )
+        assert self.verifier.verify(pred, truth).normalized_score < 0.5
+
+    def test_wrong_payment_method_scores_zero(self):
+        truth = InvoiceExtraction(
+            vendor="X", total=10.0, payments=[Payment(method=PaymentMethod.CREDIT_CARD)]
+        )
+        pred = InvoiceExtraction(
+            vendor="X", total=10.0, payments=[Payment(method=PaymentMethod.DEBIT_CARD)]
+        )
+        assert self.verifier.verify(pred, truth).normalized_score == 0.0
+
+    def test_installment_plan_is_scored(self):
+        plan = Payment(
+            method=PaymentMethod.CREDIT_CARD,
+            card_type="Visa",
+            amount=49.99,
+            installment_count=6,
+            installment_amount=49.99,
+        )
+        truth = InvoiceExtraction(vendor="X", total=299.94, payments=[plan])
+        matching = InvoiceExtraction(vendor="X", total=299.94, payments=[plan.model_copy()])
+        assert self.verifier.verify(matching, truth).normalized_score == 1.0
+
+        missed_plan = InvoiceExtraction(
+            vendor="X",
+            total=299.94,
+            payments=[Payment(method=PaymentMethod.CREDIT_CARD, card_type="Visa", amount=49.99)],
+        )
+        assert self.verifier.verify(missed_plan, truth).normalized_score < 1.0
+
+    def test_unannotated_payments_are_reported_not_punished(self):
+        truth = InvoiceExtraction(vendor="X", total=10.0, discounts=[Discount(amount=1.0)])
+        pred = InvoiceExtraction(
+            vendor="X",
+            total=10.0,
+            discounts=[Discount(amount=1.0)],
+            payments=[Payment(method=PaymentMethod.CASH)],
+            fees=[Fee(label="Bag Fee", amount=0.10)],
+        )
+        result = self.verifier.verify(pred, truth)
+        assert result.normalized_score == 1.0
+        assert result.details["unverifiable_extras"] == {"payments": 1, "fees": 1}
 
     def test_detail_of_unmatched_items_is_not_counted(self):
         """An item the model never found is the line-item verifier's penalty, not this one's."""
