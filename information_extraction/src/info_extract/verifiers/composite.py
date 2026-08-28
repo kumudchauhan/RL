@@ -7,6 +7,7 @@ from typing import ClassVar
 
 from ..schemas import InvoiceExtraction
 from .base import VerificationResult, Verifier
+from .detail_verifier import DetailVerifier
 from .field_verifier import FieldVerifier
 from .line_item_verifier import LineItemVerifier
 from .numeric_verifier import NumericVerifier
@@ -19,17 +20,21 @@ class RewardSignal:
     overall_reward: float  # Weighted composite score [0, 1]
     component_rewards: dict[str, float] = field(default_factory=dict)
     details: dict[str, VerificationResult] = field(default_factory=dict)
+    #: Components that had something to verify, and therefore contributed to the composite.
+    applied_components: list[str] = field(default_factory=list)
 
     def to_harbor_reward(self) -> dict:
         """Serialize to Harbor reward format."""
         return {
             "reward": self.overall_reward,
             "components": self.component_rewards,
+            "applied_components": list(self.applied_components),
             "metadata": {
                 name: {
                     "score": r.score,
                     "max_score": r.max_score,
                     "normalized": r.normalized_score,
+                    "applicable": r.applicable,
                     "details": r.details,
                 }
                 for name, r in self.details.items()
@@ -41,9 +46,10 @@ class CompositeVerifier:
     """Aggregates multiple verifiers into a weighted reward signal."""
 
     DEFAULT_WEIGHTS: ClassVar[dict[str, float]] = {
-        "field_accuracy": 0.25,
-        "numeric_accuracy": 0.35,
-        "line_item_f1": 0.40,
+        "field_accuracy": 0.20,
+        "numeric_accuracy": 0.30,
+        "line_item_f1": 0.35,
+        "detail_accuracy": 0.15,
     }
 
     def __init__(self, weights: dict[str, float] | None = None):
@@ -52,6 +58,7 @@ class CompositeVerifier:
             FieldVerifier(),
             NumericVerifier(),
             LineItemVerifier(),
+            DetailVerifier(),
         ]
 
     def compute_reward(
@@ -67,13 +74,22 @@ class CompositeVerifier:
             results[verifier.name] = result
             component_rewards[verifier.name] = result.normalized_score
 
-        overall = sum(
-            component_rewards.get(name, 0.0) * weight
-            for name, weight in self.weights.items()
-        )
+        # Components with nothing to verify are dropped and the remaining weights
+        # renormalized, so an unannotated field neither rewards nor punishes the model.
+        applied = [name for name, r in results.items() if r.applicable and name in self.weights]
+        weight_total = sum(self.weights[name] for name in applied)
+
+        if weight_total > 0:
+            overall = (
+                sum(component_rewards[name] * self.weights[name] for name in applied)
+                / weight_total
+            )
+        else:
+            overall = 0.0
 
         return RewardSignal(
             overall_reward=overall,
             component_rewards=component_rewards,
             details=results,
+            applied_components=applied,
         )

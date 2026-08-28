@@ -64,4 +64,5 @@ class NumericVerifier(Verifier):
             score=total_score,
             max_score=float(total_fields) if total_fields > 0 else 1.0,
             details=details,
+            applicable=total_fields > 0,
         )

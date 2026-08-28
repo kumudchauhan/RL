@@ -6,12 +6,12 @@ Structured data extraction from invoice emails and order confirmations using Cla
 
 |  |  |
 |---|---|
-| **What** | Parses `.eml` and `.pdf` invoices, then extracts vendor, order, totals, and line items as schema-valid JSON via Claude tool-use |
+| **What** | Parses `.eml` and `.pdf` invoices, then extracts vendor, order, totals, and fully detailed line items as schema-valid JSON via Claude tool-use |
 | **Why** | Turns extraction quality into a *verifiable, granular reward* — the signal an RLVR training loop would need |
-| **How it's scored** | Weighted composite: field accuracy 0.25 · numeric accuracy 0.35 · line-item F1 0.40 |
-| **Privacy** | Two-tier PII masking inside the parser — nothing unmasked reaches the API, and the document corpus stays out of git |
+| **How it's scored** | Weighted composite: field 0.20 · numeric 0.30 · line-item F1 0.35 · line-item detail 0.15 |
+| **Privacy** | Two-tier PII masking inside the parser, plus an output schema with no field for a name, address, phone, email, or card number — so there is nothing to leak, masked or otherwise |
 | **Status** | Evaluation and verifier framework works end to end; policy optimization not yet implemented |
-| **Stack** | Python 3.11+, uv, `anthropic`, Pydantic, pymupdf; 98 tests that run with no API key |
+| **Stack** | Python 3.11+, uv, `anthropic`, Pydantic, pymupdf; 148 tests that run with no API key |
 
 **Contents** — [Current state](#current-project-state) · [Not yet implemented](#not-yet-implemented) ·
 [Next milestone](#next-technical-milestone) · [Setup](#setup) · [Usage](#usage) ·
@@ -58,13 +58,31 @@ Input is a raw `.eml` order confirmation or a `.pdf` receipt. Output is an `Invo
 (see `schemas.py`), so every prediction is validated on arrival:
 
 - **Document** — vendor, order id, order date, delivery date, currency
-- **Line items** — product name, quantity, unit price, total price, SKU
 - **Money** — subtotal, tax, shipping cost, discount, total
-- **Payment** — method, card type, last four
-- **Addresses** — shipping and billing
+- **Discounts and coupons** (order level and per line) — printed description, code, issuer
+  (`Groupon`, `manufacturer coupon`, ...), amount, percentage
+- **Payment** — method (`credit_card`, `debit_card`, `apple_pay`, `google_pay`, `paypal`,
+  `gift_card`, `cash`, `ebt`, ...) and card brand as printed
+- **Line items**
+  - product name, quantity (fractional allowed, e.g. `1.24 lb`), unit of measure,
+    unit price, line total
+  - **every identifier the document prints** — `upc`, `sku`, `asin`, `product_number`, plus
+    `other_identifiers[{label, value}]` for anything else (`PLU`, `ISBN`, `Style #`) with the
+    label kept as printed
+  - **taxonomy the document itself states** — `department` (a section header such as
+    `PRODUCE`) and `category` (`Beverages`, `Makeup`)
+  - per-item discounts and coupons
 
-The last two are masked before the document ever reaches the model, so they come back `null`
-by design and no verifier scores them — see [PII Redaction](#pii-redaction).
+Two rules are enforced rather than requested:
+
+- **Nothing is invented.** Every field is optional, so anything the document does not print
+  comes back `null` (or `[]`). A category is never inferred from a product name, and a quantity
+  is never assumed to be 1.
+- **No personal data, in any form.** The schema has *no* field for a name, address, phone
+  number, email, or card number — not even a masked or synthetic one. `assert_pii_free_schema()`
+  runs at import, `extra="forbid"` rejects any key that is not in the schema, and any redaction
+  placeholder that survives into a response (`[PERSON_1]`, `[ADDRESS_2]`) is stripped from the
+  output. See [PII Redaction](#pii-redaction).
 
 ## Setup
 
@@ -120,7 +138,7 @@ uv run extract-eval --no-pii-redaction
           ▼
   ┌─────────────────────────────┐
   │ dataset/loader.py           │   ◄── annotations/*.json (ground truth)
-  │ pair document + annotation  │   → ExtractionTask
+  │ pair, prune dropped fields  │   → ExtractionTask
   └─────────────────────────────┘
           │
           ▼
@@ -131,7 +149,7 @@ uv run extract-eval --no-pii-redaction
           │
           ▼
   ┌─────────────────────────────┐
-  │ verifiers/                  │   field · numeric · line-item
+  │ verifiers/                  │   field · numeric · line-item · detail
   │ prediction vs ground truth  │   → composite.py → RewardSignal
   └─────────────────────────────┘
           │
@@ -144,19 +162,20 @@ uv run extract-eval --no-pii-redaction
 
 | Path | Responsibility | Key types |
 |------|----------------|-----------|
-| `schemas.py` | Extraction target as Pydantic models; also the source of the tool JSON schema | `InvoiceExtraction`, `LineItem`, `Address`, `PaymentInfo` |
+| `schemas.py` | Extraction target as Pydantic models; source of the tool JSON schema; PII-free by construction (import-time guard, `extra="forbid"`, placeholder scrubbing) | `InvoiceExtraction`, `LineItem`, `ProductIdentifier`, `Discount`, `PaymentInfo` |
 | `parsers/base.py` | Parser interface (`can_handle` / `parse`) and the parsed-document contract | `DocumentParser`, `ParsedDocument` |
 | `parsers/eml_parser.py` | `.eml` → text/HTML body, subject, sender, headers | `EmlParser` |
 | `parsers/pdf_parser.py` | `.pdf` text layer via pymupdf (lazy import, optional extra) | `PdfParser` |
 | `parsers/pii.py` | Two-tier PII masking with stable placeholders, one redactor per document | `PIIPolicy`, `PIIRedactor` |
-| `dataset/loader.py` | Match each source document to its annotation, build the eval set | `DatasetLoader` |
+| `dataset/loader.py` | Match each source document to its annotation, prune annotation fields the schema drops, build the eval set | `DatasetLoader`, `prune_annotation` |
 | `dataset/tasks.py` | One evaluation instance; serializes to Harbor task format | `ExtractionTask` |
 | `agent/prompts.py` | System + user prompt templates | — |
 | `agent/extraction_agent.py` | Claude call with `tool_choice={"type": "tool", ...}`; rollout capture | `ExtractionAgent` |
 | `verifiers/base.py` | Verifier interface and normalized scoring | `Verifier`, `VerificationResult` |
-| `verifiers/field_verifier.py` | Scalar fields — exact and fuzzy string match | `FieldVerifier` |
+| `verifiers/field_verifier.py` | Scalar fields, incl. `payment.method`/`payment.card_type` — exact and fuzzy match | `FieldVerifier` |
 | `verifiers/numeric_verifier.py` | Monetary fields — tolerance-based comparison | `NumericVerifier` |
-| `verifiers/line_item_verifier.py` | Line items — greedy bipartite matching, weighted F1 | `LineItemVerifier` |
+| `verifiers/line_item_verifier.py` | Line items — greedy bipartite matching on name/quantity/total, weighted F1 | `LineItemVerifier` |
+| `verifiers/detail_verifier.py` | Per-item detail on matched items — identifiers, taxonomy, unit price, coupons | `DetailVerifier` |
 | `verifiers/composite.py` | Weighted aggregation into a single training signal | `CompositeVerifier`, `RewardSignal` |
 | `runner/evaluate.py` | Harness + `extract-eval` CLI; writes JSON results and the text report | `EvaluationRunner` |
 
@@ -168,9 +187,9 @@ uv run extract-eval --no-pii-redaction
   `to_harbor_task()` emits the Harbor-shaped input/expected_output pair.
 - **`InvoiceExtraction`** — the same model serves as the API tool schema and as the type of
   both prediction and ground truth, so a prediction is schema-valid by construction.
-- **`VerificationResult`** — `score`, `max_score`, `normalized_score`, plus a `details` dict
-  carrying the per-field evidence the report prints.
-- **`RewardSignal`** — `overall_reward`, `component_rewards`, `details`;
+- **`VerificationResult`** — `score`, `max_score`, `normalized_score`, `applicable`, plus a
+  `details` dict carrying the per-field evidence the report prints.
+- **`RewardSignal`** — `overall_reward`, `component_rewards`, `applied_components`, `details`;
   `to_harbor_reward()` is the RLVR-facing shape.
 - **Rollout record** (`--capture-rollouts`) — `system`, `input`, `output`, `raw_response`,
   `model`, `temperature`, stored alongside the reward in `results/run_*.json`.
@@ -178,13 +197,19 @@ uv run extract-eval --no-pii-redaction
 ### How the reward is composed
 
 Each verifier returns a raw score and a maximum, normalized to `[0, 1]`. The composite is a
-fixed weighted sum:
+weighted sum over the components that had something to verify:
 
 ```
-overall_reward = 0.25 * field_accuracy
-               + 0.35 * numeric_accuracy
-               + 0.40 * line_item_f1
+overall_reward = 0.20 * field_accuracy
+               + 0.30 * numeric_accuracy
+               + 0.35 * line_item_f1
+               + 0.15 * detail_accuracy
 ```
+
+A verifier reports `applicable=False` when the ground truth states nothing it can check — an
+annotation with no line items, or one that records no UPCs. Those components are dropped and the
+remaining weights renormalized, so annotating detail incrementally never reads as a regression,
+and a blank annotation never scores as a perfect one.
 
 Weights are overridable — `CompositeVerifier(weights={...})` — and the reasoning behind the
 defaults is in [Reward Weights](#reward-weights).
@@ -214,8 +239,15 @@ tiers, one shared redactor per document:
 Values are replaced with stable placeholders (`[PERSON_1]`, `[ADDRESS_2]`, `[CARD_1]`) so
 document structure survives, and `ParsedDocument.redaction_report` records counts only — never
 the original values. Extraction-relevant content (order numbers, totals, dates, product names)
-is deliberately preserved; `shipping_address`, `billing_address`, and `payment.last_four`
-become unextractable by design, and no verifier scores them.
+is deliberately preserved.
+
+Redaction is the first of two layers. The second is the schema itself: there is no
+`shipping_address`, `billing_address`, `payment.last_four`, or free-text `notes` field to put a
+value in, so nothing personal can reach a result file or a captured rollout even in masked or
+synthetic form. `assert_pii_free_schema()` fails at import if such a field is ever added,
+`extra="forbid"` rejects unknown keys, and any placeholder that survives into a model response
+is stripped by `ExtractionModel`. Annotations still hold the real values locally; the loader
+prunes them (`prune_annotation`) and logs the field *names* it dropped, never the values.
 
 Configure per category with `PIIPolicy`:
 
@@ -237,9 +269,10 @@ export INFO_EXTRACT_PII_NAMES="Jane Q Doe,J Doe"
 
 | Verifier | Weight | Difficulty |
 |----------|--------|------------|
-| Field accuracy (fuzzy string) | 0.25 | Easiest — vendor, dates, IDs |
-| Numeric accuracy (tolerance) | 0.35 | Harder — must be exact to the cent |
-| Line item F1 (greedy match) | 0.40 | Hardest — multi-field matching |
+| Field accuracy (fuzzy string) | 0.20 | Easiest — vendor, dates, IDs, payment method and card brand |
+| Numeric accuracy (tolerance) | 0.30 | Harder — must be exact to the cent |
+| Line item F1 (greedy match) | 0.35 | Hard — name + quantity + line total, matched item by item |
+| Detail accuracy (per matched item) | 0.15 | Hardest — UPC/SKU/ASIN/product number, printed taxonomy, unit price, coupons |
 
 The weights are deliberate: the hardest signal carries the most reward, so a model cannot look
 good by getting only the easy fields right. Override them with
@@ -251,23 +284,34 @@ have scored, for comparison.
 After each evaluation run, a human-readable report is generated (`results/report_*.txt`) that includes:
 
 - **Per-task field breakdown** — every field scored with `+` (correct), `~` (partial), `x` (wrong) alongside predicted vs expected values
-- **Equal vs weighted scoring comparison** — side-by-side table showing how uniform 0.33/0.33/0.33 weighting compares to the actual weighted scoring
+- **Line-item detail breakdown** — per identifier/taxonomy/coupon field: how many values the annotation states and how many were transcribed, plus a count of detail the model extracted that the annotation does not yet cover (reported, never scored)
+- **Equal vs weighted scoring comparison** — side-by-side table showing how uniform weighting compares to the actual weighted scoring, over the same set of applicable components
 - **Explanation of why weighted scoring matters** — equal weighting inflates scores by over-crediting easy fields; weighted scoring reflects real-world extraction difficulty
 
 Example excerpt:
 
 ```
-  Task                         Equal (0.33 each)    Weighted (0.25/0.35/0.40)
+  Detail (identifiers/taxonomy/coupons): 0.778 over 9 annotated value(s)
+    + category             1.00  (1 annotated)
+    + department           1.00  (1 annotated)
+    + sku                  1.00  (1 annotated)
+    + unit_price           1.00  (2 annotated)
+    x upc                  0.00  (1 annotated)
+    x other_identifiers    0.00  (1 annotated)
+    i extracted but not annotated (unscored): asin x1
+
+  Task                         Equal (0.25 each)    Weighted (0.20/0.30/0.35/0.15)
   ---------------------------- -------------------- --------------------
-  email_order_sample               0.9500               0.9450
-  pdf_receipt_sample               0.7100               0.6575
+  email_order_sample             0.9421               0.9638
+  pdf_receipt_sample             0.7100               0.6575
   ---------------------------- -------------------- --------------------
-  MEAN                           0.8300               0.8013
+  MEAN                           0.8261               0.8107
 ```
 
 ## Run Tests
 
-98 tests cover the schema, both parsers, PII redaction, and every verifier. No API key and no
+148 tests cover the schema, both parsers, PII redaction, the annotation loader, and every
+verifier. No API key and no
 network access required — verifiers run on synthetic extractions and redaction is tested against
 synthetic documents, so a fresh clone is green.
 

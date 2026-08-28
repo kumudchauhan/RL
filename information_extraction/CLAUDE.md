@@ -10,7 +10,8 @@ An information extraction pipeline that parses invoice emails and order confirma
 
 ```
 src/info_extract/
-├── schemas.py              # Pydantic models: InvoiceExtraction, LineItem, Address, PaymentInfo
+├── schemas.py              # Pydantic models: InvoiceExtraction, LineItem, ProductIdentifier,
+│                           #   Discount, PaymentInfo — PII-free by construction
 ├── parsers/
 │   ├── base.py             # ParsedDocument dataclass + DocumentParser ABC
 │   ├── eml_parser.py       # .eml → ParsedDocument (stdlib email + BeautifulSoup)
@@ -21,12 +22,13 @@ src/info_extract/
 │   └── extraction_agent.py # Claude API wrapper using forced tool-use for structured output
 ├── verifiers/
 │   ├── base.py             # Verifier ABC + VerificationResult
-│   ├── field_verifier.py   # Scalar fields (vendor, order_id, dates) — exact/fuzzy match
+│   ├── field_verifier.py   # Scalar fields (vendor, order_id, dates, payment.*) — exact/fuzzy
 │   ├── numeric_verifier.py # Monetary fields (total, tax, etc.) — tolerance-based
 │   ├── line_item_verifier.py # Line items — greedy bipartite matching with F1
+│   ├── detail_verifier.py  # Per-matched-item detail — identifiers, taxonomy, unit price, coupons
 │   └── composite.py        # Weighted aggregation → RewardSignal
 ├── dataset/
-│   ├── loader.py           # Reads annotations/ + parses source docs into tasks
+│   ├── loader.py           # Reads annotations/, prunes dropped fields, parses source docs
 │   └── tasks.py            # ExtractionTask dataclass
 └── runner/
     └── evaluate.py         # Main harness + CLI entrypoint (extract-eval)
@@ -36,10 +38,24 @@ src/info_extract/
 
 - **Claude tool-use** for extraction guarantees valid JSON matching the Pydantic schema
 - **Granular, composable verifiers** produce per-field reward signals (not binary pass/fail)
-- **Weighted composite reward**: field_accuracy=0.25, numeric_accuracy=0.35, line_item_f1=0.40
+- **Weighted composite reward**: field_accuracy=0.20, numeric_accuracy=0.30, line_item_f1=0.35,
+  detail_accuracy=0.15
+- **Applicability + renormalization**: a verifier sets `VerificationResult.applicable=False` when
+  the ground truth states nothing it can check (no line items, no annotated UPCs). Inapplicable
+  components are dropped from the composite and the remaining weights renormalized, so
+  annotating detail incrementally never looks like a regression — and a blank annotation never
+  scores 1.0. `RewardSignal.applied_components` records which components counted.
 - **Partial credit scoring**: fuzzy string matching for vendor names, tolerance-based numeric comparison, weighted F1 for line items
+- **Transcribe, never infer**: every schema field is optional, so anything the document does not
+  print comes back `null`/`[]`. `currency` does *not* default to `"USD"`; a category is never
+  derived from a product name; a missing quantity is never assumed to be 1.
+- **Report-don't-punish for unannotated detail**: `DetailVerifier` scores only values the ground
+  truth states, and lists detail the model extracted beyond the annotation as
+  `unverifiable_extras`.
 - **Rollout capture mode**: stores full prompt/response for RLVR training data generation
 - **PII masked at the parser**, before any content reaches the API or a rollout file
+- **PII-free output schema** (second layer, see below): no field exists that could hold a name,
+  address, phone, email, or card number — not even masked or synthetic
 
 ## PII Redaction
 
@@ -88,10 +104,20 @@ Details:
   `INFO_EXTRACT_PII_NAMES` (comma-separated). The structural heuristics cannot cover every
   layout — some PDFs put a label and its value in unrelated text blocks — so naming the
   document owner explicitly is the reliable backstop.
-- **Consequence:** `shipping_address`, `billing_address`, and `payment.last_four` are not
-  extractable from redacted text — the model returns null for them. No verifier scores those
-  fields (`FieldVerifier` covers vendor/order_id/dates/currency), so composite reward is
-  unaffected. Note that files in `annotations/` still hold the real values.
+- **Second layer — the schema itself.** Redaction is not the only guard. `schemas.py` has no
+  `shipping_address`, `billing_address`, `payment.last_four`, or free-text `notes` field, so
+  there is nowhere for personal data to land in a result file or a rollout even in masked form:
+  - `assert_pii_free_schema()` runs at import and fails if any field name contains a fragment in
+    `FORBIDDEN_FIELD_FRAGMENTS` (`address`, `phone`, `email`, `last_four`, `customer`, ...).
+  - `model_config = ConfigDict(extra="forbid")` on `ExtractionModel` rejects unknown keys, so a
+    removed field cannot be reintroduced through a response or an annotation.
+  - A `model_validator(mode="after")` strips surviving redaction placeholders
+    (`[PERSON_1]`, `[ADDRESS_2]`, ...) from string values — `None` for optional fields, `""` for
+    required ones.
+  - `annotations/` still holds the real values locally. `dataset/loader.py` prunes them
+    (`DROPPED_ANNOTATION_KEYS`, `DROPPED_PAYMENT_KEYS`, `prune_annotation`) and logs only the
+    field *names* it dropped; `unexpected_keys()` makes an unrecognised key a loud `ValueError`
+    rather than a silent pass-through.
 - Order numbers, totals, dates, and product names are deliberately preserved: phone patterns
   require digit-group separators, PAN masking requires a Luhn check and skips `IMEI:`/`Serial:`
   labelled values (IMEIs are Luhn-valid too), and `#1234`-style store numbers and `&#8199;`
@@ -135,13 +161,33 @@ uv run ruff check src/ tests/
 
 Each annotation file in `annotations/` is a JSON file with a `_meta` key (source_file, annotator, date) plus all fields from the `InvoiceExtraction` schema. See `annotations/_template.json` for the template.
 
+Existing annotations may still carry `shipping_address`, `billing_address`, `notes`, and
+`payment.last_four` from the v1 schema — the loader prunes those on load, so annotation files
+need no editing. Any *other* unrecognised key is a `ValueError`, which is deliberate: a typo in a
+field name would otherwise silently score as "not annotated". Line-item detail
+(`upc`/`asin`/`department`/`discounts`/...) is optional per annotation; whatever is absent simply
+is not scored.
+
 ## Extraction Schema (fields extracted)
 
-- `vendor`, `order_id`, `order_date`, `delivery_date`
-- `shipping_address`, `billing_address` (street, city, state, zip_code, country)
-- `line_items[]` (product_name, quantity, unit_price, total_price, sku)
-- `subtotal`, `tax`, `shipping_cost`, `discount`, `total`, `currency`
-- `payment` (method, last_four, card_type)
+- `vendor`, `order_id`, `order_date`, `delivery_date`, `currency`
+- `subtotal`, `tax`, `shipping_cost`, `discount`, `total`
+- `discounts[]` (order level) — `Discount(description, code, source, amount, percentage)`, where
+  `source` is the issuer as printed (`Groupon`, `manufacturer coupon`, ...)
+- `payment` — `method` (`PaymentMethod` enum: credit_card, debit_card, gift_card, store_credit,
+  apple_pay, google_pay, paypal, venmo, cash, check, ebt, bank_transfer, other) and `card_type`
+  (brand as printed). **No card number, no `last_four`.**
+- `line_items[]`
+  - `product_name`, `quantity` (float — weighed goods print `1.24 lb`), `quantity_unit`,
+    `unit_price`, `total_price`
+  - every identifier the document prints: `sku`, `upc`, `asin`, `product_number`, plus
+    `other_identifiers[]` (`ProductIdentifier(label, value)`) for anything else (`PLU`, `ISBN`,
+    `Style #`) with the label kept verbatim
+  - taxonomy **only as printed**: `department` (section header, e.g. `PRODUCE`) and `category`
+    (e.g. `Beverages`, `Makeup`) — never inferred from the product name
+  - `discounts[]` — per-item coupons and markdowns
+
+**No address, name, phone, email, or card-number field exists** — see PII Redaction above.
 
 ## Configuration
 
@@ -159,10 +205,13 @@ Each annotation file in `annotations/` is a JSON file with a `_meta` key (source
 
 ## Testing
 
-98 tests covering schemas, parsers, PII redaction, and all verifiers. Tests run without API
-access (verifiers tested with synthetic data, parsers/redaction tested against synthetic text
+148 tests covering schemas, parsers, PII redaction, the dataset loader, and all verifiers. Tests
+run without API access (verifiers tested with synthetic data, parsers/redaction tested against synthetic text
 plus the actual .eml and .pdf files in `invoices/`). `tests/test_pii.py` includes a leak test
 asserting the recipient's address never survives in any field of any sample document;
+`tests/test_schemas.py` asserts the schema and its generated JSON schema expose no PII-shaped
+property and that placeholders are scrubbed; `tests/test_loader.py` asserts a pruned annotation's
+ground truth serializes with no dropped value in it;
 `tests/test_pdf_parser.py` covers the PDF column-layout shapes and skips cleanly when pymupdf
 or the sample PDFs are absent.
 

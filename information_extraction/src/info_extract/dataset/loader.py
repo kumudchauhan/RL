@@ -8,8 +8,63 @@ from pathlib import Path
 from ..parsers.base import DocumentParser
 from ..parsers.eml_parser import EmlParser
 from ..parsers.pdf_parser import PdfParser
-from ..schemas import InvoiceExtraction
+from ..schemas import InvoiceExtraction, LineItem, PaymentInfo
 from .tasks import ExtractionTask
+
+#: Annotation keys the extraction schema deliberately no longer carries. Annotations are the
+#: local ground truth and keep whatever the annotator recorded, so they are pruned here rather
+#: than edited: nothing personal is loaded into memory, let alone written to a result file.
+DROPPED_ANNOTATION_KEYS = frozenset({"shipping_address", "billing_address", "notes"})
+
+#: Same, one level down: the card number is masked in the parser and has no schema field.
+DROPPED_PAYMENT_KEYS = frozenset({"last_four"})
+
+
+def prune_annotation(data: dict) -> tuple[dict, list[str]]:
+    """Strip ``_meta`` and retired/PII keys from raw annotation data.
+
+    Returns the ground-truth payload and the names (never the values) of what was dropped.
+    """
+    dropped: list[str] = []
+    pruned: dict = {}
+
+    for key, value in data.items():
+        if key.startswith("_"):
+            continue
+        if key in DROPPED_ANNOTATION_KEYS:
+            dropped.append(key)
+            continue
+        if key == "payment" and isinstance(value, dict):
+            dropped.extend(f"payment.{k}" for k in value if k in DROPPED_PAYMENT_KEYS)
+            pruned[key] = {k: v for k, v in value.items() if k not in DROPPED_PAYMENT_KEYS}
+            continue
+        pruned[key] = value
+
+    return pruned, dropped
+
+
+def unexpected_keys(data: dict) -> list[str]:
+    """Annotation keys the schema neither accepts nor knowingly drops.
+
+    Reported by name only, so a stale annotation fails loudly without echoing its contents.
+    """
+    unknown = [key for key in data if key not in InvoiceExtraction.model_fields]
+
+    payment = data.get("payment")
+    if isinstance(payment, dict):
+        unknown.extend(
+            f"payment.{key}" for key in payment if key not in PaymentInfo.model_fields
+        )
+
+    for index, item in enumerate(data.get("line_items") or []):
+        if isinstance(item, dict):
+            unknown.extend(
+                f"line_items[{index}].{key}"
+                for key in item
+                if key not in LineItem.model_fields
+            )
+
+    return unknown
 
 
 class DatasetLoader:
@@ -45,8 +100,17 @@ class DatasetLoader:
                 print(f"Warning: source file not found: {source_file}")
                 continue
 
-            # Build ground truth from non-meta fields
-            gt_data = {k: v for k, v in data.items() if not k.startswith("_")}
+            # Build ground truth from the fields the schema still carries
+            gt_data, dropped = prune_annotation(data)
+            unknown = unexpected_keys(gt_data)
+            if unknown:
+                raise ValueError(
+                    f"{annotation_file.name}: unrecognised annotation field(s): "
+                    f"{', '.join(sorted(unknown))}. Add them to the schema, or to "
+                    f"DROPPED_ANNOTATION_KEYS if they must stay out of the output."
+                )
+            if dropped:
+                print(f"  {annotation_file.name}: not loaded: {', '.join(sorted(dropped))}")
             ground_truth = InvoiceExtraction(**gt_data)
 
             # Parse the source document
