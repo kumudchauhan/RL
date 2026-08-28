@@ -21,6 +21,7 @@ __pycache__/
 # Local docs
 PIPELINE.md
 SPEC.md
+TECHNICAL_MAP.md
 
 # uv
 uv.lock

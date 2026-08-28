@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..parsers.base import DocumentParser
 from ..parsers.eml_parser import EmlParser
+from ..parsers.pdf_parser import PdfParser
 from ..schemas import InvoiceExtraction
 from .tasks import ExtractionTask
 
@@ -23,7 +24,10 @@ class DatasetLoader:
         self.invoices_dir = Path(invoices_dir)
         self.annotations_dir = Path(annotations_dir)
         self.redact_pii = redact_pii
-        self.parsers: list[DocumentParser] = [EmlParser(redact_pii=redact_pii)]
+        self.parsers: list[DocumentParser] = [
+            EmlParser(redact_pii=redact_pii),
+            PdfParser(redact_pii=redact_pii),
+        ]
 
     def load_tasks(self) -> list[ExtractionTask]:
         tasks = []

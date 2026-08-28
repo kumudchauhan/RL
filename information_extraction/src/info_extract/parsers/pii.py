@@ -15,6 +15,7 @@ values.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -103,8 +104,11 @@ def is_routing_header(name: str) -> bool:
 # --- Patterns ---------------------------------------------------------------
 
 # Matches plain and URL-encoded (%40) addresses; also `name [at] host` forms.
+# A single line break is tolerated around the `@` because PDF text extraction
+# wraps mid-address (`orders@\nvendor.example`).
+_WRAP = r"[ \t]*(?:\n[ \t]*)?"
 EMAIL_RE = re.compile(
-    r"[A-Za-z0-9._%+\-]+(?:@|%40|\s?\[at\]\s?)[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
+    rf"[A-Za-z0-9._%+\-]+{_WRAP}(?:@|%40|\[at\]){_WRAP}[A-Za-z0-9.\-]+\.[A-Za-z]{{2,}}",
     re.IGNORECASE,
 )
 EMAIL_PARTS_RE = re.compile(
@@ -122,6 +126,8 @@ PHONE_RE = re.compile(
     re.VERBOSE,
 )
 TEL_URI_RE = re.compile(r"tel:\+?\d[\d\s().\-]{5,}\d", re.IGNORECASE)
+# E.164 with no separators, common on invoices: `+15105550142`
+INTL_PHONE_RE = re.compile(r"(?<![\w+])\+\d{10,15}(?!\d)")
 
 # `**** **** **** 4321`, `xxxx-1234`, `•••• 1234`. `#` is deliberately not a mask
 # char here: `#1234` is a store/order number and `&#8199;` is an HTML entity.
@@ -129,12 +135,16 @@ CARD_MASKED_RE = re.compile(r"(?:[*x•·]{2,}[\s\-–]?){1,4}\d{2,4}(?!\d)", re
 # A single mask char, as in `American Express *5678` — require a full 4 digits so
 # footnote markers (`*2 items`) are left alone.
 CARD_SHORT_MASK_RE = re.compile(r"(?<![\w*])[*x•·][\s\-]?\d{4}(?!\d)", re.IGNORECASE)
-# `ending in 5678`, `ending with 1003` — keeps the phrasing, drops the digits.
+# `ending in 5678`, `ending with 5678` — keeps the phrasing, drops the digits.
 CARD_ENDING_RE = re.compile(
     r"(ending\s+(?:in|with)\s+|ending\s+)(\d{4})(?!\d)", re.IGNORECASE
 )
 # Full PAN, validated with Luhn to avoid eating order numbers.
 CARD_PAN_RE = re.compile(r"(?<![\d\-])(?:\d{4}[\s\-]?){3}\d{1,4}(?![\d\-])")
+#: Labels for device/product identifiers that also pass Luhn — see _sub_pan.
+SERIAL_LABEL_RE = re.compile(
+    r"(?i)\b(?:imei|serial(?:\s*(?:no|number|#))?|s\.?\s?no|sn|meid|vin)\b[:# ]*$"
+)
 
 STREET_SUFFIXES = (
     "St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Ct|Court|Dr|Drive|Ln|Lane|Way|"
@@ -142,25 +152,67 @@ STREET_SUFFIXES = (
     "Loop|Row|Alley|Path|Walk|Crescent|Close|Mews"
 )
 UNIT_KEYWORDS = "#|Apt\\.?|Apartment|Suite|Ste\\.?|Unit|Fl\\.?|Floor|Rm\\.?|Room"
+# Single-line by design (`[ \t]` not `\s`): a street line never wraps, and letting
+# it span line breaks made it swallow whole PDF blocks — "December 23, 2025 /
+# DeepLearning.AI / 100 North Arlington Avenue" collapsed into one placeholder.
 STREET_RE = re.compile(
-    rf"(?<![\w])\d{{1,6}}[A-Za-z]?\s+(?:[\w.'\-]+\s+){{0,4}}(?:{STREET_SUFFIXES})\b\.?"
-    rf"(?:\s*,?\s*(?:{UNIT_KEYWORDS})\s*[\w\-]+)?",
+    rf"(?<![\w])\d{{1,6}}[A-Za-z]?[ \t]+(?:[\w.'\-]+[ \t]+){{0,4}}(?:{STREET_SUFFIXES})\b\.?"
+    rf"(?:[ \t]*,?[ \t]*(?:{UNIT_KEYWORDS})[ \t]*[\w\-]+)?",
     re.IGNORECASE,
 )
-_CITY = r"[A-Z][A-Za-z.'\-]+(?:[ ][A-Z][A-Za-z.'\-]+){0,3}"
-# "Madison, WI 53703" / "Springfield, CA, 62704"
+# At least three letters per word: a two-letter "city" is really a code, and with
+# `\s` gaps below that let "NA / NA / 12345.67" read as city/state/ZIP and swallow
+# the invoice total.
+_CITY = r"[A-Z][A-Za-z.'\-]{2,}(?:[ ][A-Z][A-Za-z.'\-]+){0,3}"
+STATE_NAMES = (
+    "Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|"
+    "Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|"
+    "Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|"
+    "New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|"
+    "Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|"
+    "Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming"
+)
+#: Two-letter code or spelled-out name: "Madison, WI" / "Springfield, Illinois".
+_STATE = rf"(?:[A-Z]{{2}}|{STATE_NAMES})"
+#: One gap between address fields — spaces, or a single line break where the
+#: block wraps. Plain `\s+` let a match reach across unrelated lines.
+_GAP = r"(?:[ \t]+|[ \t]*\n[ \t]*)"
+# "Madison, WI 53703" / "Springfield, IL, 62704" / "Springfield, Illinois 62704"
 CITY_STATE_ZIP_RE = re.compile(
-    rf"(?<![\w]){_CITY},?\s+[A-Z]{{2}}\b,?\s+\d{{5}}(?:-\d{{4}})?(?![\d])"
+    rf"(?<![\w]){_CITY},?{_GAP}{_STATE}\b,?{_GAP}\d{{5}}(?:-\d{{4}})?(?![\d])"
 )
-# "Springfield 62704-1234 CA" — some vendors reorder city/zip/state
+# "Springfield 62704-1234 IL" — some vendors reorder city/zip/state
 CITY_ZIP_STATE_RE = re.compile(
-    rf"(?<![\w]){_CITY},?\s+\d{{5}}(?:-\d{{4}})?\s+[A-Z]{{2}}\b(?![\w])"
+    rf"(?<![\w]){_CITY},?{_GAP}\d{{5}}(?:-\d{{4}})?{_GAP}{_STATE}\b(?![\w])"
 )
+# A whole line of "53703 Madison" — ZIP-first ordering. Anchored to the full line so
+# a 5-digit order number followed by a capitalized word is not swept up.
+ZIP_CITY_LINE_RE = re.compile(rf"^[ \t]*\d{{5}}(?:-\d{{4}})?[ \t]+{_CITY}[ \t]*$", re.MULTILINE)
 # ZIP+4 is specific enough to mask on its own.
 ZIP4_RE = re.compile(r"(?<![\d\-])\d{5}-\d{4}(?![\d\-])")
+#: A line holding nothing but a postal code. Masked only when adjacent to an
+#: already-masked line or a country line — see _mask_bare_zip_lines.
+BARE_ZIP_LINE_RE = re.compile(r"^[ \t]*\d{5}(?:-\d{4})?[ \t]*$")
+COUNTRY_LINE_RE = re.compile(
+    r"^[ \t]*(?:United States(?: of America)?|U\.?S\.?A\.?|US|Canada|Mexico|"
+    r"United Kingdom|UK|India|Australia|Germany|France)[ \t]*,?[ \t]*$",
+    re.IGNORECASE,
+)
 PO_BOX_RE = re.compile(r"P\.?\s?O\.?\s*Box\s*\d+", re.IGNORECASE)
-UNIT_LINE_RE = re.compile(rf"^(?:(?:{UNIT_KEYWORDS})\s*)?[\w\-#/]{{1,8}}$", re.IGNORECASE)
+UNIT_LINE_RE = re.compile(rf"^(?:(?:{UNIT_KEYWORDS})[ \t]*)?[\w\-#/]{{1,8}}$", re.IGNORECASE)
+#: A line that is explicitly a unit designator, e.g. "Apt 5", "Suite 200E".
+UNIT_PREFIXED_LINE_RE = re.compile(rf"^(?:{UNIT_KEYWORDS})[ \t]*[\w\-#/]{{1,10}}$", re.IGNORECASE)
+#: A line holding only a state, e.g. "MA" / "California". PDF column layouts split
+#: an address across one line per field.
+STATE_LINE_RE = re.compile(rf"^(?:[A-Z]{{2}}|{STATE_NAMES})[ \t]*,?$")
+#: A line holding only a city name, e.g. "Springfield" / "SPRINGFIELD".
+CITY_LINE_RE = re.compile(rf"^(?:{_CITY}|[A-Z][A-Z.'\-]+(?:[ ][A-Z][A-Z.'\-]+){{0,3}})[ \t]*,?$")
 ADDRESS_TOKEN_RE = re.compile(r"\[ADDRESS_\d+\]")
+#: How many lines after a masked address line may still be treated as part of it.
+MAX_ADDRESS_CONTINUATION_LINES = 4
+#: How many stacked field labels to walk past when looking for a recipient label
+#: above a name-shaped line.
+MAX_NAME_LABEL_LOOKBACK = 4
 
 # Name hints in the body.
 GREETING_RE = re.compile(
@@ -175,10 +227,51 @@ THANKS_RE = re.compile(
     r"(?=[!?.,;\n]|$)"
 )
 SHIP_TO_RE = re.compile(
-    r"(?i:ship(?:ping|ped)?\s+(?:to|address)|bill(?:ing)?\s+(?:to|address)|"
+    r"(?i:ship(?:ping|ped)?\s+(?:to|address)|bill(?:ing|ed)?\s+(?:to|address)|"
     r"deliver(?:y|ed)?\s+(?:to|address)|mailing\s+address|sold\s+to|attn\.?|"
-    r"recipient|(?:customer\s+)?name)\s*:?\s*\n?\s*"
-    r"([A-Z][a-z'\-]+(?:\s+[A-Z][a-z'\-]+){1,2})\b"
+    r"invoice\s+for|recipient|(?:customer\s+)?name)\s*:?\s*\n?[ \t]*"
+    # The name itself must sit on one line: allowing \s here let the capture run
+    # past the newline and learn the next field's label ("Jane Roe / Status")
+    # as part of the name, which then masked that word document-wide.
+    r"([A-Z][a-z'\-]+(?:[ \t]+[A-Z][a-z'\-]+){1,2})\b"
+)
+
+# --- Column-layout name discovery (mostly PDFs) ------------------------------
+# PDF text extraction emits one line per visual field, so a "Bill to" label and
+# its value can be several lines apart and the name is often ALL CAPS
+# ("Customer Information / JANE ROE"). SHIP_TO_RE, which wants the value
+# adjacent and Title Case, misses both shapes.
+
+#: A line that is nothing but a person-shaped name, Title Case or ALL CAPS, with
+#: an optional leading account/receipt id ("1000042 - JANE ROE").
+NAME_LINE_RE = re.compile(
+    r"^(?:[\d\-#]{2,12}[ \t]*[-–][ \t]*)?"
+    r"((?:[A-Z][a-z'\-]+|[A-Z][A-Z'\-]+)(?:[ \t]+(?:[A-Z][a-z'\-]+|[A-Z][A-Z'\-]+)){1,2})"
+    r"[ \t]*,?$"
+)
+#: Labels whose value is the document's recipient — i.e. a person, not the vendor.
+RECIPIENT_LABEL_LINE_RE = re.compile(
+    r"^[ \t]*(?:ship(?:ping|ped)?[ \t]+(?:to|address)|bill(?:ing|ed)?[ \t]+(?:to|address)|"
+    r"deliver(?:y|ed)?[ \t]+(?:to|address)|sold[ \t]+to|mailing[ \t]+address|"
+    r"customer(?:[ \t]+(?:information|details|name))?|client|patient|member|recipient|"
+    r"attn\.?|invoice[ \t]+for|name)[ \t]*:?[ \t]*$",
+    re.IGNORECASE,
+)
+#: Organisations get caught by NAME_LINE_RE too; these suffixes rule them out so a
+#: vendor name under "Bill to" is not learned as a person and masked document-wide.
+COMPANY_SUFFIX_RE = re.compile(
+    r"\b(?:Inc|Inc\.|LLC|L\.L\.C\.|Ltd|Ltd\.|Limited|Corp|Corp\.|Corporation|Co|Co\.|"
+    r"Company|GmbH|PLC|LLP|PBC|Foundation|Trust|Association|University|College|School|"
+    r"Hospital|Center|Centre|Bank|Group|Holdings|Partners|Store|Market|Services)\b",
+    re.IGNORECASE,
+)
+#: A label line looks like a name line ("Issue Date", "Date Of Service"); learning
+#: one would mask that word everywhere. Any of these words disqualifies the line.
+NAME_LINE_REJECT_RE = re.compile(
+    r"(?i)\b(?:date|invoice|receipt|order|number|no|status|total|amount|due|paid|price|"
+    r"qty|quantity|item|items|description|provider|vendor|seller|merchant|method|"
+    r"payment|card|tax|subtotal|discount|shipping|delivery|address|phone|email|page|"
+    r"time|balance|summary|detail|details|terms|notes|service|services|ref|reference)\b"
 )
 
 #: Words that are roles, providers, or document labels — never masked as names.
@@ -187,6 +280,7 @@ SHIP_TO_RE = re.compile(
 NAME_STOPWORDS = frozenset(
     {
         "address",
+        "anonymous",
         "arrives",
         "card",
         "delivery",
@@ -215,6 +309,13 @@ NAME_STOPWORDS = frozenset(
         "care",
         "contact",
         "customer",
+        "friend",
+        "guest",
+        "madam",
+        "madame",
+        "sir",
+        "there",
+        "valued",
         "email",
         "gmail",
         "help",
@@ -225,7 +326,9 @@ NAME_STOPWORDS = frozenset(
         "member",
         "news",
         "newsletter",
+        "none",
         "noreply",
+        "null",
         "notification",
         "notifications",
         "order",
@@ -239,6 +342,7 @@ NAME_STOPWORDS = frozenset(
         "shop",
         "support",
         "team",
+        "unknown",
         "update",
         "updates",
         "user",
@@ -266,6 +370,22 @@ class PIIPolicy:
     drop_routing_headers: bool = True
     #: Additional names to mask (e.g. household members not named in headers).
     extra_names: tuple[str, ...] = ()
+
+    @classmethod
+    def from_env(cls, **overrides) -> PIIPolicy:
+        """Build a policy, seeding ``extra_names`` from ``INFO_EXTRACT_PII_NAMES``.
+
+        The name heuristics rely on document structure, and some layouts give
+        them nothing to work with — a PDF whose "Client" label sits three lines
+        above its value in a different text block, for instance. Naming the
+        document owner explicitly (``INFO_EXTRACT_PII_NAMES="Jane Q Doe,J Doe"``)
+        is the reliable backstop for those.
+        """
+        raw = os.environ.get("INFO_EXTRACT_PII_NAMES", "")
+        names = tuple(n.strip() for n in raw.split(",") if n.strip())
+        if names:
+            overrides["extra_names"] = tuple(overrides.get("extra_names", ())) + names
+        return cls(**overrides)
 
 
 @dataclass
@@ -376,7 +496,68 @@ class PIIRedactor:
             return
         for pattern in (SHIP_TO_RE, GREETING_RE, THANKS_RE):
             for match in pattern.finditer(text):
-                self.learn_name(match.group(1))
+                if self._is_plausible_name(match.group(1)):
+                    self.learn_name(match.group(1))
+        self._learn_names_from_layout(text)
+
+    @staticmethod
+    def _is_plausible_name(candidate: str) -> bool:
+        """Reject captures that are really labels or organisations.
+
+        A label captured as a name is the worst failure mode here: the word then
+        gets masked everywhere in the document. "Customer Name / Doc No" in a
+        column layout put "Doc No" where the value should be, which masked every
+        ``DOC/...`` order reference in the invoice.
+        """
+        return not (
+            NAME_LINE_REJECT_RE.search(candidate) or COMPANY_SUFFIX_RE.search(candidate)
+        )
+
+    def _learn_names_from_layout(self, text: str) -> None:
+        """Mine names from one-field-per-line layouts (PDF column extraction).
+
+        A name-shaped line counts as a person when either
+
+        * the next non-empty line is a street address — the strongest signal
+          available, and label-independent; or
+        * a recipient label ("Bill to", "Customer Information", "Client") sits
+          within a few lines above it, with only other labels in between.
+        """
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            match = NAME_LINE_RE.match(stripped)
+            if not match:
+                continue
+            candidate = match.group(1)
+            if not self._is_plausible_name(candidate):
+                continue
+            if self._street_follows(lines, i) or self._recipient_label_precedes(lines, i):
+                self.learn_name(candidate)
+
+    @staticmethod
+    def _street_follows(lines: list[str], i: int) -> bool:
+        for nxt in lines[i + 1 : i + 3]:
+            stripped = nxt.strip()
+            if not stripped:
+                continue
+            return bool(STREET_RE.match(stripped) or PO_BOX_RE.match(stripped))
+        return False
+
+    @staticmethod
+    def _recipient_label_precedes(lines: list[str], i: int) -> bool:
+        seen = 0
+        for prev in reversed(lines[:i]):
+            stripped = prev.strip()
+            if not stripped:
+                continue
+            if RECIPIENT_LABEL_LINE_RE.match(stripped):
+                return True
+            # Only walk past other field labels — a column layout stacks them.
+            if seen >= MAX_NAME_LABEL_LOOKBACK or not NAME_LINE_REJECT_RE.search(stripped):
+                return False
+            seen += 1
+        return False
 
     # --- tier 1: headers ----------------------------------------------------
 
@@ -444,6 +625,7 @@ class PIIRedactor:
 
         if self.policy.mask_phones:
             text = TEL_URI_RE.sub(lambda m: "tel:" + self._placeholder(PHONE, m.group(0)), text)
+            text = INTL_PHONE_RE.sub(lambda m: self._placeholder(PHONE, m.group(0)), text)
             text = PHONE_RE.sub(lambda m: self._placeholder(PHONE, m.group(0)), text)
 
         if self.policy.mask_addresses:
@@ -451,7 +633,9 @@ class PIIRedactor:
             text = STREET_RE.sub(lambda m: self._placeholder(ADDRESS, m.group(0)), text)
             text = CITY_STATE_ZIP_RE.sub(lambda m: self._placeholder(ADDRESS, m.group(0)), text)
             text = CITY_ZIP_STATE_RE.sub(lambda m: self._placeholder(ADDRESS, m.group(0)), text)
+            text = ZIP_CITY_LINE_RE.sub(lambda m: self._placeholder(ADDRESS, m.group(0)), text)
             text = ZIP4_RE.sub(lambda m: self._placeholder(ADDRESS, m.group(0)), text)
+            text = self._mask_bare_zip_lines(text)
             text = self._mask_interior_address_lines(text)
 
         if self.policy.mask_names and self._name_tokens:
@@ -463,23 +647,88 @@ class PIIRedactor:
         digits = re.sub(r"\D", "", match.group(0))
         if len(digits) < 13 or not _luhn_valid(digits):
             return match.group(0)
+        # IMEIs and some serial numbers are Luhn-valid too, and they identify the
+        # product, not the payer — the label right before them says which it is.
+        if SERIAL_LABEL_RE.search(match.string[max(0, match.start() - 24) : match.start()]):
+            return match.group(0)
         return self._placeholder(CARD, match.group(0))
 
-    def _mask_interior_address_lines(self, text: str) -> str:
-        """Mask short lines wedged between two masked address lines.
+    def _mask_bare_zip_lines(self, text: str) -> str:
+        """Mask a lone postal-code line that sits next to a country line.
 
-        Multi-line blocks like ``500 Oak Ave / 914 / Madison, WI 53703`` leave the
-        bare apartment number behind after the street and city lines are masked.
+        Some invoices print only the postal code and country of the recipient
+        ("Bill to / <name> / 62704 / United States"), so there is no street or
+        city for the address patterns to anchor to. A line that is nothing but a
+        postal code, directly beside a country line, is not a total or an order
+        number — masking it is safe.
         """
         lines = text.split("\n")
-        for i in range(1, len(lines) - 1):
-            stripped = lines[i].strip()
-            if not stripped or not UNIT_LINE_RE.match(stripped):
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not BARE_ZIP_LINE_RE.match(stripped):
                 continue
-            prev_token = ADDRESS_TOKEN_RE.search(lines[i - 1])
-            if prev_token and ADDRESS_TOKEN_RE.search(lines[i + 1]):
-                lines[i] = lines[i].replace(stripped, prev_token.group(0))
+            neighbours = lines[i + 1 : i + 2] + lines[max(0, i - 1) : i]
+            if any(COUNTRY_LINE_RE.match(n.strip()) for n in neighbours):
+                lines[i] = line.replace(stripped, self._placeholder(ADDRESS, stripped))
         return "\n".join(lines)
+
+    def _mask_interior_address_lines(self, text: str) -> str:
+        """Mask address lines left stranded around a masked multi-line block.
+
+        Street and city lines are masked independently, so blocks like
+        ``500 Oak Ave / 914 / Madison, WI 53703`` or ``123 Main St. / Apt 5``
+        leave the apartment line behind, and PDF column layouts split an address
+        into one line per field (``123 Main St / Springfield / IL / 62704``)
+        where only the street line matches on its own.
+
+        Masking therefore continues line by line after a masked address for as
+        long as each line still looks like part of an address, capped by
+        :data:`MAX_ADDRESS_CONTINUATION_LINES` so a stray match cannot run away.
+        """
+        lines = text.split("\n")
+        token: str | None = None
+        run = 0
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            found = ADDRESS_TOKEN_RE.search(line)
+            if found:
+                # A masked line restarts the run; the token carries forward so the
+                # whole block collapses to one placeholder.
+                token, run = found.group(0), 0
+                continue
+            if token is None or run >= MAX_ADDRESS_CONTINUATION_LINES:
+                token = None
+                continue
+            if not self._is_address_continuation(lines, i, stripped):
+                token = None
+                continue
+            lines[i] = line.replace(stripped, token)
+            run += 1
+        return "\n".join(lines)
+
+    @staticmethod
+    def _is_address_continuation(lines: list[str], i: int, stripped: str) -> bool:
+        """Whether line ``i`` is a leftover piece of the address block above it."""
+        if UNIT_PREFIXED_LINE_RE.match(stripped):  # "Apt 5"
+            return True
+        if BARE_ZIP_LINE_RE.match(stripped):  # "62704"
+            return True
+        if STATE_LINE_RE.match(stripped):  # "MA" / "California"
+            return True
+        # A bare token ("914") or a lone city ("Springfield") is too generic to
+        # mask on the preceding line alone — require the block to continue below.
+        if UNIT_LINE_RE.match(stripped) or CITY_LINE_RE.match(stripped):
+            for nxt in lines[i + 1 : i + 2]:
+                after = nxt.strip()
+                return bool(
+                    ADDRESS_TOKEN_RE.search(nxt)
+                    or BARE_ZIP_LINE_RE.match(after)
+                    or STATE_LINE_RE.match(after)
+                    or COUNTRY_LINE_RE.match(after)
+                )
+        return False
 
     def _mask_names(self, text: str) -> str:
         pattern = re.compile(

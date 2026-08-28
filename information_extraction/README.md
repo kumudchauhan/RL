@@ -4,7 +4,7 @@ Structured data extraction from invoice emails and order confirmations using Cla
 
 ## What It Does
 
-Takes raw `.eml` email files (order confirmations, receipts) and extracts key information out of it:
+Takes raw `.eml` email files and `.pdf` invoices (order confirmations, receipts) and extracts key information out of it:
 - Vendor, order ID, order date, invoice date, total spent
 - Line items information (product, quantity, price, SKU)
 
@@ -15,6 +15,9 @@ Evaluates extraction quality against human-annotated ground truth using weighted
 ```bash
 cd information_extraction
 uv sync
+
+# PDF invoices need pymupdf
+uv sync --extra pdf
 ```
 
 ## Usage
@@ -39,11 +42,14 @@ uv run extract-eval --no-pii-redaction
 Documents are redacted in the parser, before any text reaches the API or a rollout file. Two
 tiers, one shared redactor per document:
 
-1. **Envelope** — recipient addresses masked in full; sender addresses keep only the vendor
-   domain (`[EMAIL_2]@vendor.example`); routing/identity headers (`Received*`, `*-SPF`, `DKIM-*`,
-   `Message-ID`, `List-Unsubscribe`, ...) are dropped.
+1. **Envelope** — for email: recipient addresses masked in full; sender addresses keep only the
+   vendor domain (`[EMAIL_2]@vendor.example`); routing/identity headers (`Received*`, `*-SPF`,
+   `DKIM-*`, `Message-ID`, `List-Unsubscribe`, ...) are dropped. For PDF, the document-info
+   dictionary plays the same role: `author`/`title` are redacted and `creator`/`producer`,
+   which fingerprint the device that printed the receipt, are dropped.
 2. **Invoice content** — postal addresses, emails, phone numbers, card numbers, and personal
-   names in both the text and HTML bodies.
+   names in both the text and HTML bodies. PDFs additionally get line-level rules, since text
+   extraction splits an address into one line per field and prints names in ALL CAPS.
 
 Values are replaced with stable placeholders (`[PERSON_1]`, `[ADDRESS_2]`, `[CARD_1]`) so
 document structure survives, and `ParsedDocument.redaction_report` records counts only — never
@@ -60,11 +66,18 @@ from info_extract.parsers.pii import PIIPolicy
 parser = EmlParser(pii_policy=PIIPolicy(mask_addresses=False, extra_names=("Ravi",)))
 ```
 
+Parsers default to `PIIPolicy.from_env()`, so the document owner's name can be supplied out of
+band as a backstop for layouts the heuristics cannot read:
+
+```bash
+export INFO_EXTRACT_PII_NAMES="Jane Q Doe,J Doe"
+```
+
 ## Run Tests
 
 ```bash
 uv sync --extra dev
-uv run pytest
+uv run python -m pytest -q     # `uv run pytest` may pick up a system pytest
 ```
 
 ## Project Structure
@@ -72,7 +85,7 @@ uv run pytest
 ```
 src/info_extract/
 ├── schemas.py              # Pydantic extraction schema
-├── parsers/                # Document parsing (.eml) + two-tier PII redaction
+├── parsers/                # Document parsing (.eml, .pdf) + two-tier PII redaction
 ├── agent/                  # Claude API extraction (tool-use)
 ├── verifiers/              # Field, numeric, line item verifiers + composite reward
 ├── dataset/                # Annotation loader + task management

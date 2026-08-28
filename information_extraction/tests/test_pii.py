@@ -71,7 +71,7 @@ class TestTier2Content:
 
     def test_street_and_city_state_zip(self):
         r = PIIRedactor()
-        out = r.redact_text("123 Main St, Apt 5, Springfield, CA, 62704, USA")
+        out = r.redact_text("123 Main St, Apt 5, Springfield, IL, 62704, USA")
         assert "Main St" not in out
         assert "62704" not in out
         assert "USA" in out
@@ -86,7 +86,7 @@ class TestTier2Content:
 
     def test_reordered_city_zip_state(self):
         r = PIIRedactor()
-        out = r.redact_text("123 Main St Apt 5 Springfield 62704-1234 CA United States")
+        out = r.redact_text("123 Main St Apt 5 Springfield 62704-1234 IL United States")
         assert "Springfield" not in out
         assert "62704" not in out
 

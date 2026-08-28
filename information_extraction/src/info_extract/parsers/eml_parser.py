@@ -24,7 +24,7 @@ class EmlParser(DocumentParser):
 
     def __init__(self, redact_pii: bool = True, pii_policy: PIIPolicy | None = None):
         self.redact_pii = redact_pii
-        self.pii_policy = pii_policy or PIIPolicy()
+        self.pii_policy = pii_policy or PIIPolicy.from_env()
 
     def can_handle(self, file_path: str) -> bool:
         return Path(file_path).suffix.lower() == ".eml"
@@ -58,7 +58,9 @@ class EmlParser(DocumentParser):
         subject = msg.get("Subject")
         sender = msg.get("From")
         recipient = msg.get("To")
+        file_name = Path(file_path).name
         metadata = {
+            "source_name": file_name,
             "message_id": msg.get("Message-ID"),
             "headers": dict(msg.items()),
         }
@@ -94,6 +96,10 @@ class EmlParser(DocumentParser):
         # Tier 2: content
         text_body = redactor.redact_text(text_body)
         html_body = redactor.redact_text(html_body) if html_body else html_body
+
+        # Filenames leak too ("invoice_2023-04-12-Roe.pdf"), and this is the
+        # name the prompt shows the model. Redact last, once names are known.
+        metadata["source_name"] = redactor.redact_text(file_name)
 
         return ParsedDocument(
             source_path=file_path,
