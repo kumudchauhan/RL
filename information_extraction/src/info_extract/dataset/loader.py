@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..parsers.base import DocumentParser
 from ..parsers.eml_parser import EmlParser
+from ..parsers.pdf_parser import PdfParser
 from ..schemas import InvoiceExtraction
 from .tasks import ExtractionTask
 
@@ -14,10 +15,19 @@ from .tasks import ExtractionTask
 class DatasetLoader:
     """Loads annotated tasks from disk."""
 
-    def __init__(self, invoices_dir: str = "invoices", annotations_dir: str = "annotations"):
+    def __init__(
+        self,
+        invoices_dir: str = "invoices",
+        annotations_dir: str = "annotations",
+        redact_pii: bool = True,
+    ):
         self.invoices_dir = Path(invoices_dir)
         self.annotations_dir = Path(annotations_dir)
-        self.parsers: list[DocumentParser] = [EmlParser()]
+        self.redact_pii = redact_pii
+        self.parsers: list[DocumentParser] = [
+            EmlParser(redact_pii=redact_pii),
+            PdfParser(redact_pii=redact_pii),
+        ]
 
     def load_tasks(self) -> list[ExtractionTask]:
         tasks = []

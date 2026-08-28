@@ -1,5 +1,11 @@
-"""Tests for document parsers."""
+"""Tests for document parsers.
 
+Sample-driven tests run against whatever is in `invoices/`, which is gitignored:
+no real filename, subject, order number, or amount is hardcoded here, so the
+suite carries no trace of the documents it was developed against.
+"""
+
+import re
 from pathlib import Path
 
 import pytest
@@ -8,6 +14,12 @@ from info_extract.parsers.base import ParsedDocument
 from info_extract.parsers.eml_parser import EmlParser
 
 INVOICES_DIR = Path(__file__).parent.parent / "invoices"
+EML_FILES = sorted(INVOICES_DIR.glob("*.eml")) if INVOICES_DIR.exists() else []
+requires_eml = pytest.mark.skipif(not EML_FILES, reason="no sample .eml in invoices/")
+
+#: An order/receipt reference in a subject line: a long digit run, optionally
+#: hyphenated ("1000200-12345678", "[1000000123]").
+ORDER_REF_RE = re.compile(r"\d[\d\-]{6,}\d")
 
 
 class TestEmlParser:
@@ -24,55 +36,39 @@ class TestEmlParser:
         assert not self.parser.can_handle("test.txt")
         assert not self.parser.can_handle("test.html")
 
-    @pytest.mark.skipif(
-        not (INVOICES_DIR / "Your Store Receipt.eml").exists(),
-        reason="Sample invoice not available",
-    )
-    def test_parse_store_receipt(self):
-        path = str(INVOICES_DIR / "Your Store Receipt.eml")
-        doc = self.parser.parse(path)
 
-        assert isinstance(doc, ParsedDocument)
-        assert doc.format == "eml"
-        assert doc.subject == "Your Store Receipt"
-        assert "storemail" in (doc.sender or "").lower()
-        assert doc.text_body  # Should have content
-        assert "19.99" in doc.text_body
+@requires_eml
+class TestEmlParserOnSamples:
+    def setup_method(self):
+        self.parser = EmlParser()
 
-    @pytest.mark.skipif(
-        not (INVOICES_DIR / "Your receipt from Acme.eml").exists(),
-        reason="Sample invoice not available",
-    )
-    def test_parse_acme(self):
-        path = str(INVOICES_DIR / "Your receipt from Acme.eml")
-        doc = self.parser.parse(path)
+    def test_every_sample_yields_subject_sender_and_body(self):
+        for path in EML_FILES:
+            doc = self.parser.parse(str(path))
+            assert isinstance(doc, ParsedDocument), path.name
+            assert doc.format == "eml", path.name
+            assert doc.subject, path.name
+            assert doc.sender, path.name
+            assert doc.text_body or doc.html_body, path.name
 
-        assert isinstance(doc, ParsedDocument)
-        assert doc.format == "eml"
-        assert "Acme" in (doc.subject or "")
-        assert doc.text_body or doc.html_body
+    def test_order_references_in_subject_survive_redaction(self):
+        """Order ids are extraction targets, so redaction must leave them alone."""
+        raw_parser = EmlParser(redact_pii=False)
+        checked = 0
 
-    @pytest.mark.skipif(
-        not (INVOICES_DIR / "Thank you for your Acme Cosmetics order [1000000123].eml").exists(),
-        reason="Sample invoice not available",
-    )
-    def test_parse_cosmetics_order(self):
-        path = str(
-            INVOICES_DIR / "Thank you for your Acme Cosmetics order [1000000123].eml"
-        )
-        doc = self.parser.parse(path)
+        for path in EML_FILES:
+            refs = ORDER_REF_RE.findall(raw_parser.parse(str(path)).subject or "")
+            if not refs:
+                continue
+            subject = self.parser.parse(str(path)).subject or ""
+            for ref in refs:
+                assert ref in subject, path.name
+            checked += 1
 
-        assert isinstance(doc, ParsedDocument)
-        assert doc.format == "eml"
-        assert "1000000123" in (doc.subject or "")
-        assert doc.text_body
+        if not checked:
+            pytest.skip("no sample subject carries an order reference")
 
     def test_parse_returns_metadata(self):
-        # Test with any available eml file
-        eml_files = list(INVOICES_DIR.glob("*.eml"))
-        if not eml_files:
-            pytest.skip("No eml files available")
-
-        doc = self.parser.parse(str(eml_files[0]))
+        doc = self.parser.parse(str(EML_FILES[0]))
         assert "headers" in doc.metadata
-        assert doc.source_path == str(eml_files[0])
+        assert doc.source_path == str(EML_FILES[0])

@@ -16,6 +16,10 @@ Rules:
 - If quantity is not explicitly stated, assume 1
 - For SKU/ASIN, extract product identifiers if visible
 - Discount should be a positive value representing the amount saved
+- Documents are PII-redacted before you see them: placeholders such as \
+[PERSON_1], [EMAIL_1], [PHONE_1], [ADDRESS_1], [CARD_1] stand in for removed values. \
+Treat a placeholder as missing information — return null for any field whose value \
+is only a placeholder, and never guess the underlying value
 """
 
 USER_PROMPT_TEMPLATE = """\

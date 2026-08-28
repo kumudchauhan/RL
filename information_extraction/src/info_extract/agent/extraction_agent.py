@@ -27,8 +27,10 @@ class ExtractionAgent:
         }
 
     def _build_user_message(self, document: ParsedDocument) -> str:
+        # Use the redacted file name, not source_path: filenames carry names and
+        # order IDs, and source_path is kept raw for local traceability only.
         return USER_PROMPT_TEMPLATE.format(
-            source=document.source_path,
+            source=document.metadata.get("source_name") or document.format,
             format=document.format,
             subject=document.subject or "N/A",
             sender=document.sender or "N/A",
