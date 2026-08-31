@@ -8,9 +8,7 @@ LLM judges anywhere in the reward — every check is arithmetic, a set compariso
 the written credit policy.
 
 **V1 Goal**
-Build a self-contained financial RLVR simulation environment where an LLM produces a credit
-decision, deterministic verifiers calculate reward, and a simple RL/post-training loop can
-eventually optimize against that reward.
+Build a self-contained financial RLVR simulation environment where an LLM produces a credit decision, deterministic verifiers calculate reward, and a simple RL/post-training loop that can be eventually optimized against that reward.
 V1a = complete environment + reward loop — **done**
 V1b = actual policy optimization — not started
 
