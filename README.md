@@ -1,6 +1,7 @@
 # RL
 
-Reinforcement Learning projects — experiments in RLVR (RL from Verifiable Rewards), reward shaping, and LLM-based agents.
+Reinforcement Learning projects - experiments in RLVR (RL from Verifiable Rewards), reward shaping, and LLM-based agents. 
+(Currently In Progress)
 
 ## Projects
 
