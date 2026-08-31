@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "description": "Ten synthetic loan applicants spanning the underwriting decision space. Features only; every derived metric (DTI, loan-to-income) is computed in code so the data has a single source of truth. Currency is USD, income and debt are monthly.",
+  "applicants": [
+    {
+      "id": "APP-001",
+      "scenario": "baseline-borderline",
+      "monthly_income": 8000,
+      "monthly_debt": 3200,
+      "credit_utilization": 0.42,
+      "credit_score": 720,
+      "employment_years": 5,
+      "requested_loan": 25000
+    },
+    {
+      "id": "APP-002",
+      "scenario": "strong-approve",
+      "monthly_income": 12500,
+      "monthly_debt": 1500,
+      "credit_utilization": 0.08,
+      "credit_score": 790,
+      "employment_years": 11,
+      "requested_loan": 20000
+    },
+    {
+      "id": "APP-003",
+      "scenario": "clear-decline",
+      "monthly_income": 3100,
+      "monthly_debt": 1780,
+      "credit_utilization": 0.94,
+      "credit_score": 575,
+      "employment_years": 0.5,
+      "requested_loan": 18000
+    },
+    {
+      "id": "APP-004",
+      "scenario": "short-tenure-strong-credit",
+      "monthly_income": 9400,
+      "monthly_debt": 1900,
+      "credit_utilization": 0.11,
+      "credit_score": 765,
+      "employment_years": 0.7,
+      "requested_loan": 15000
+    },
+    {
+      "id": "APP-005",
+      "scenario": "high-score-high-dti",
+      "monthly_income": 7200,
+      "monthly_debt": 3550,
+      "credit_utilization": 0.31,
+      "credit_score": 781,
+      "employment_years": 9,
+      "requested_loan": 30000
+    },
+    {
+      "id": "APP-006",
+      "scenario": "low-score-no-debt",
+      "monthly_income": 6000,
+      "monthly_debt": 0,
+      "credit_utilization": 0.09,
+      "credit_score": 618,
+      "employment_years": 8,
+      "requested_loan": 10000
+    },
+    {
+      "id": "APP-007",
+      "scenario": "revolving-stress",
+      "monthly_income": 8800,
+      "monthly_debt": 2100,
+      "credit_utilization": 0.91,
+      "credit_score": 668,
+      "employment_years": 6,
+      "requested_loan": 22000
+    },
+    {
+      "id": "APP-008",
+      "scenario": "oversized-request",
+      "monthly_income": 5400,
+      "monthly_debt": 1350,
+      "credit_utilization": 0.22,
+      "credit_score": 742,
+      "employment_years": 4,
+      "requested_loan": 60000
+    },
+    {
+      "id": "APP-009",
+      "scenario": "dti-threshold-boundary",
+      "monthly_income": 7000,
+      "monthly_debt": 3010,
+      "credit_utilization": 0.55,
+      "credit_score": 700,
+      "employment_years": 3,
+      "requested_loan": 20000
+    },
+    {
+      "id": "APP-010",
+      "scenario": "high-income-high-obligations",
+      "monthly_income": 21000,
+      "monthly_debt": 11550,
+      "credit_utilization": 0.63,
+      "credit_score": 758,
+      "employment_years": 14,
+      "requested_loan": 75000
+    }
+  ]
+}
