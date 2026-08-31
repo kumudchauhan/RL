@@ -6,8 +6,8 @@ Reinforcement Learning projects — experiments in RLVR (RL from Verifiable Rewa
 
 | Project | What it does | Status |
 |---------|--------------|--------|
-| [**information_extraction**](./information_extraction/) | Extracts structured data from invoice emails and PDF receipts with Claude tool-use, then scores it with composable weighted verifiers to produce a Harbor-style RLVR reward | Evaluation + verifier framework complete · RL training not yet started |
-| [**credit_underwriting**](./credit_underwriting/) | Scores a credit decision on synthetic loan applications with deterministic verifiers — DTI arithmetic, policy application, decision label, cited evidence.<br>The goal was something simple but genuinely end-to-end first: applicant in, verified reward out, with baselines bracketing it.<br>Next technical milestone: implement it in the Harbor framework. | Environment + reward loop complete · policy optimization not started |
+| [**information_extraction**](./information_extraction/) | Extracts structured data from invoice emails and PDF receipts with Claude tool-use, then scores it with composable weighted verifiers to produce a Harbor-style RLVR reward | Evaluation + verifier framework - complete · RL training - not yet started |
+| [**credit_underwriting**](./credit_underwriting/) | Scores a credit decision on synthetic loan applications with deterministic verifiers — DTI arithmetic, policy application, decision label, cited evidence.<br>The goal was something simple but genuinely end-to-end first: applicant in, verified reward out, with baselines bracketing it.<br>Next technical milestone: implement it in the Harbor framework. | Environment + reward loop - complete · policy optimization - not started |
 
 For information_extraction: [current state](./information_extraction/README.md#current-project-state) ·
 [not yet implemented](./information_extraction/README.md#not-yet-implemented) ·
