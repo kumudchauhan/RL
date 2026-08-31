@@ -11,7 +11,7 @@ Structured data extraction from invoice emails and order confirmations using Cla
 | **How it's scored** | Weighted composite: field 0.20 · numeric 0.30 · line-item F1 0.35 · line-item detail 0.15 |
 | **Privacy** | Two-tier PII masking inside the parser, plus an output schema with no field for a name, address, phone, email, or card number — so there is nothing to leak, masked or otherwise |
 | **Status** | Evaluation and verifier framework works end to end; policy optimization not yet implemented |
-| **Stack** | Python 3.11+, uv, `anthropic`, Pydantic, pymupdf; 170 tests that run with no API key |
+| **Stack** | Python 3.11+, uv, `anthropic`, Pydantic, pymupdf; 221 tests that run with no API key |
 
 **Contents** — [Current state](#current-project-state) · [Not yet implemented](#not-yet-implemented) ·
 [Next milestone](#next-technical-milestone) · [Setup](#setup) · [Usage](#usage) ·
@@ -332,8 +332,9 @@ one payment, dropped a labelled fee line, and inferred a `category` the receipt 
 
 ## Run Tests
 
-170 tests cover the schema, both parsers, PII redaction, the annotation loader, and every
-verifier. No API key and no
+221 tests cover the schema, both parsers, PII redaction, the annotation loader, and every
+verifier, including drift guards that fail if a schema field is ever added without a verifier
+that scores it. No API key and no
 network access required — verifiers run on synthetic extractions and redaction is tested against
 synthetic documents, so a fresh clone is green.
 

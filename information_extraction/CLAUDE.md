@@ -223,7 +223,7 @@ is not scored.
 
 ## Testing
 
-170 tests covering schemas, parsers, PII redaction, the dataset loader, and all verifiers. Tests
+221 tests covering schemas, parsers, PII redaction, the dataset loader, and all verifiers. Tests
 run without API access (verifiers tested with synthetic data, parsers/redaction tested against synthetic text
 plus the actual .eml and .pdf files in `invoices/`). `tests/test_pii.py` includes a leak test
 asserting the recipient's address never survives in any field of any sample document;
@@ -233,6 +233,13 @@ ground truth serializes with no dropped value in it and that a v2 `payment` anno
 loads;
 `tests/test_pdf_parser.py` covers the PDF column-layout shapes and skips cleanly when pymupdf
 or the sample PDFs are absent.
+
+`tests/test_verifiers.py::TestSchemaCoverage` is a drift guard, not a behaviour test: it probes
+every field of `InvoiceExtraction`, `LineItem`, `Payment`, `Discount`, and `Fee` — stating the
+field in the ground truth, omitting it in the prediction — and fails if no verifier's score
+moves. Companion tests assert the probe tables cover `model_fields` exactly, so adding a schema
+field without scoring it (the failure mode that silently drops a field from the reward) breaks
+the suite, naming the field in the test id.
 
 **No test hardcodes a value from the real documents.** Sample-driven tests glob `invoices/`
 and assert structural properties (every sample yields a subject/sender/body; digit runs in a

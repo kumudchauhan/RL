@@ -2,6 +2,7 @@
 
 import pytest
 
+from info_extract.runner.evaluate import COMPONENT_DESCRIPTIONS
 from info_extract.schemas import (
     Discount,
     Fee,
@@ -626,3 +627,170 @@ class TestCompositeVerifier:
         harbor = self.verifier.compute_reward(invoice, invoice).to_harbor_reward()
         assert harbor["applied_components"] == ["field_accuracy", "numeric_accuracy"]
         assert harbor["metadata"]["line_item_f1"]["applicable"] is False
+
+
+# --- schema drift guards -----------------------------------------------------
+#
+# A field added to the schema and forgotten in the verifiers would silently never be scored:
+# the run would look fine and the reward would ignore it. These probes make that a test
+# failure. Each probe states one field in the ground truth, omits it in the prediction, and
+# asserts some verifier notices. The completeness tests keep the probe tables honest.
+
+INVOICE_PROBES: dict[str, object] = {
+    "service_provider": "Instacart",
+    "order_id": "IC-77",
+    "order_date": "2026-01-01",
+    "delivery_date": "2026-01-02",
+    "currency": "USD",
+    "subtotal": 38.00,
+    "tax": 2.20,
+    "shipping_cost": 4.99,
+    "delivery_fee": 3.99,
+    "service_fee": 2.01,
+    "tip": 5.00,
+    "discount": 1.50,
+    "amount_paid": 51.30,
+    "amount_due": 249.95,
+    "line_items": [LineItem(product_name="Bananas", total_price=1.99)],
+    "discounts": [Discount(description="10% off order", code="SAVE10", amount=1.50)],
+    "fees": [Fee(label="Bag Fee", amount=0.10)],
+    "payments": [Payment(method=PaymentMethod.GIFT_CARD, amount=20.00)],
+}
+
+LINE_ITEM_PROBES: dict[str, object] = {
+    "quantity": 2.0,
+    "quantity_unit": "lb",
+    "unit_price": 5.49,
+    "total_price": 10.98,
+    "sku": "SW-12",
+    "upc": "012345678905",
+    "asin": "B00ABCDEFG",
+    "product_number": "PN-9931",
+    "other_identifiers": [ProductIdentifier(label="PLU", value="4011")],
+    "department": "GROCERY",
+    "category": "Beverages",
+    "discounts": [Discount(code="GRPN2", amount=2.00)],
+}
+
+PAYMENT_PROBES: dict[str, object] = {
+    "method": PaymentMethod.CREDIT_CARD,
+    "card_type": "Visa",
+    "amount": 49.99,
+    "installment_count": 6,
+    "installment_amount": 49.99,
+}
+
+DISCOUNT_PROBES: dict[str, object] = {
+    "description": "GROUPON $2 OFF",
+    "code": "GRPN2",
+    "source": "Groupon",
+    "amount": 2.00,
+    "percentage": 10.0,
+}
+
+FEE_PROBES: dict[str, object] = {"amount": 0.10}
+
+
+class TestSchemaCoverage:
+    """Every field the schema carries must move some verifier's score."""
+
+    def setup_method(self):
+        self.composite = CompositeVerifier()
+        self.detail = DetailVerifier()
+
+    @pytest.mark.parametrize("field_name", sorted(INVOICE_PROBES))
+    def test_every_invoice_field_is_scored(self, field_name):
+        truth = InvoiceExtraction(vendor="X", total=10.0, **{field_name: INVOICE_PROBES[field_name]})
+        pred = InvoiceExtraction(vendor="X", total=10.0)
+        assert self.composite.compute_reward(pred, truth).overall_reward < 1.0
+
+    @pytest.mark.parametrize("field_name", sorted(LINE_ITEM_PROBES))
+    def test_every_line_item_field_is_scored(self, field_name):
+        truth_item = LineItem(product_name="Water", **{field_name: LINE_ITEM_PROBES[field_name]})
+        truth = InvoiceExtraction(vendor="X", total=10.0, line_items=[truth_item])
+        pred = InvoiceExtraction(
+            vendor="X", total=10.0, line_items=[LineItem(product_name="Water")]
+        )
+        assert self.composite.compute_reward(pred, truth).overall_reward < 1.0
+
+    @pytest.mark.parametrize("field_name", sorted(PAYMENT_PROBES))
+    def test_every_payment_field_is_scored(self, field_name):
+        truth = InvoiceExtraction(
+            vendor="X", total=10.0, payments=[Payment(**{field_name: PAYMENT_PROBES[field_name]})]
+        )
+        pred = InvoiceExtraction(vendor="X", total=10.0, payments=[Payment()])
+        assert self.detail.verify(pred, truth).normalized_score < 1.0
+
+    @pytest.mark.parametrize("field_name", sorted(DISCOUNT_PROBES))
+    def test_every_discount_field_is_scored(self, field_name):
+        truth = InvoiceExtraction(
+            vendor="X",
+            total=10.0,
+            discounts=[Discount(**{field_name: DISCOUNT_PROBES[field_name]})],
+        )
+        pred = InvoiceExtraction(vendor="X", total=10.0, discounts=[Discount()])
+        assert self.detail.verify(pred, truth).normalized_score < 1.0
+
+    @pytest.mark.parametrize("field_name", sorted(FEE_PROBES))
+    def test_every_fee_field_is_scored(self, field_name):
+        truth = InvoiceExtraction(
+            vendor="X",
+            total=10.0,
+            fees=[Fee(label="Bag Fee", **{field_name: FEE_PROBES[field_name]})],
+        )
+        pred = InvoiceExtraction(vendor="X", total=10.0, fees=[Fee(label="Bag Fee")])
+        assert self.detail.verify(pred, truth).normalized_score < 1.0
+
+    def test_product_identifier_label_and_value_both_count(self):
+        truth = InvoiceExtraction(
+            vendor="X",
+            total=10.0,
+            line_items=[
+                LineItem(
+                    product_name="Bananas",
+                    other_identifiers=[ProductIdentifier(label="PLU", value="4011")],
+                )
+            ],
+        )
+        for wrong in (
+            ProductIdentifier(label="PLU", value="9999"),
+            ProductIdentifier(label="Lot", value="4011"),
+        ):
+            pred = InvoiceExtraction(
+                vendor="X",
+                total=10.0,
+                line_items=[LineItem(product_name="Bananas", other_identifiers=[wrong])],
+            )
+            assert self.detail.verify(pred, truth).normalized_score == 0.0
+
+    # --- the probe tables must keep up with the schema ---
+
+    def test_invoice_probes_cover_every_field(self):
+        # vendor and total are required, so every other test already exercises them.
+        assert set(INVOICE_PROBES) | {"vendor", "total"} == set(InvoiceExtraction.model_fields)
+
+    def test_line_item_probes_cover_every_field(self):
+        assert set(LINE_ITEM_PROBES) | {"product_name"} == set(LineItem.model_fields)
+
+    def test_payment_probes_cover_every_field(self):
+        assert set(PAYMENT_PROBES) == set(Payment.model_fields)
+
+    def test_discount_probes_cover_every_field(self):
+        assert set(DISCOUNT_PROBES) == set(Discount.model_fields)
+
+    def test_fee_probes_cover_every_field(self):
+        assert set(FEE_PROBES) | {"label"} == set(Fee.model_fields)
+
+    def test_product_identifier_fields_are_all_probed(self):
+        assert set(ProductIdentifier.model_fields) == {"label", "value"}
+
+    def test_scalar_fields_are_split_between_field_and_numeric_verifiers(self):
+        """No scalar field belongs to both verifiers, and none is orphaned."""
+        scalar_verified = set(FieldVerifier.FIELDS) | set(NumericVerifier.FIELDS)
+        structural = {"line_items", "discounts", "fees", "payments"}
+        assert set(FieldVerifier.FIELDS) & set(NumericVerifier.FIELDS) == set()
+        assert set(InvoiceExtraction.model_fields) - scalar_verified == structural
+
+    def test_report_explains_every_weighted_component(self):
+        """The report's explanation block would print a blank line for a missing description."""
+        assert set(CompositeVerifier.DEFAULT_WEIGHTS) <= set(COMPONENT_DESCRIPTIONS)
