@@ -14,7 +14,13 @@ from ..dataset.loader import DatasetLoader
 from ..schemas import InvoiceExtraction
 from ..verifiers.composite import CompositeVerifier
 
-EQUAL_WEIGHTS = {"field_accuracy": 1 / 3, "numeric_accuracy": 1 / 3, "line_item_f1": 1 / 3}
+#: What each reward component measures, for the report's explanation block.
+COMPONENT_DESCRIPTIONS = {
+    "field_accuracy": "easiest: vendor, service provider, dates, IDs",
+    "numeric_accuracy": "harder: totals, fees, billed vs paid, exact to the cent",
+    "line_item_f1": "hard: name + quantity + total, matched per item",
+    "detail_accuracy": "hardest: identifiers, taxonomy, coupons, fees, tenders",
+}
 
 
 class EvaluationRunner:
@@ -74,12 +80,16 @@ class EvaluationRunner:
                 result["rollout"] = rollout
 
             results.append(result)
-            print(
-                f"  Reward: {reward.overall_reward:.3f} "
-                f"(fields={reward.component_rewards.get('field_accuracy', 0):.3f}, "
-                f"numeric={reward.component_rewards.get('numeric_accuracy', 0):.3f}, "
-                f"items={reward.component_rewards.get('line_item_f1', 0):.3f})"
+            components = ", ".join(
+                f"{name}="
+                + (
+                    f"{score:.3f}"
+                    if name in reward.applied_components
+                    else "n/a"  # nothing annotated for this component
+                )
+                for name, score in reward.component_rewards.items()
             )
+            print(f"  Reward: {reward.overall_reward:.3f} ({components})")
 
         summary = self._compute_summary(results)
 
@@ -131,7 +141,8 @@ class EvaluationRunner:
         w = lines.append
 
         actual_weights = self.verifier.weights
-        weight_str = "/".join(f"{actual_weights[k]:.2f}" for k in ["field_accuracy", "numeric_accuracy", "line_item_f1"])
+        equal_weights = {name: 1 / len(actual_weights) for name in actual_weights}
+        weight_str = "/".join(f"{w:.2f}" for w in actual_weights.values())
 
         w("")
         w("=" * 60)
@@ -204,13 +215,37 @@ class EvaluationRunner:
                     w(f"    x {num_gt - num_matched} missing ground truth item(s)")
                 w("")
 
+            # Detail: identifiers, taxonomy, unit price, coupons, fee and tender lines
+            detail_meta = metadata.get("detail_accuracy", {})
+            detail_details = detail_meta.get("details", {})
+            if detail_details:
+                scored_slots = detail_details.get("scored_slots", 0)
+                if scored_slots:
+                    w(
+                        f"  Detail (identifiers/taxonomy/coupons/fees/payments): "
+                        f"{detail_meta.get('normalized', 0):.3f} "
+                        f"over {scored_slots} annotated value(s)"
+                    )
+                    for fname, info in sorted(detail_details.get("per_field", {}).items()):
+                        score = info["score"]
+                        mark = "+" if score >= 0.99 else ("~" if score > 0 else "x")
+                        w(f"    {mark} {fname:<20} {score:.2f}  ({info['slots']} annotated)")
+                else:
+                    w("  Detail (identifiers/taxonomy/coupons/fees/payments): nothing annotated")
+                extras = detail_details.get("unverifiable_extras", {})
+                if extras:
+                    extra_str = ", ".join(f"{k} x{v}" for k, v in sorted(extras.items()))
+                    w(f"    i extracted but not annotated (unscored): {extra_str}")
+                w("")
+
         # --- Comparison table ---
         w("")
         w("=" * 60)
         w("  COMPARISON: Equal Weight vs Weighted Scoring")
         w("=" * 60)
         w("")
-        w(f"  {'Task':<28} {'Equal (0.33 each)':<20} {'Weighted (' + weight_str + ')':<20}")
+        equal_label = f"Equal ({1 / len(actual_weights):.2f} each)"
+        w(f"  {'Task':<28} {equal_label:<20} {'Weighted (' + weight_str + ')':<20}")
         w(f"  {'-'*28} {'-'*20} {'-'*20}")
 
         equal_scores = []
@@ -219,11 +254,17 @@ class EvaluationRunner:
         for result in results:
             task_id = result["task_id"]
             components = result["reward"]["components"]
+            applied = result["reward"].get("applied_components") or list(components)
 
             weighted = result["reward"]["reward"]
-            equal = sum(
-                components.get(k, 0.0) * EQUAL_WEIGHTS[k]
-                for k in EQUAL_WEIGHTS
+            # Same renormalization as the weighted score, so the two columns differ only in
+            # the weights, not in which components they count.
+            equal_total = sum(equal_weights[k] for k in applied if k in equal_weights)
+            equal = (
+                sum(components.get(k, 0.0) * equal_weights[k] for k in applied if k in equal_weights)
+                / equal_total
+                if equal_total
+                else 0.0
             )
 
             equal_scores.append(equal)
@@ -256,9 +297,13 @@ class EvaluationRunner:
         w("  Equal weighting over-credits easy fields, inflating the overall score.")
         w("  Weighted scoring reflects real-world extraction difficulty:")
         w("")
-        w(f"    field_accuracy  (w={actual_weights['field_accuracy']:.2f}) - easiest: vendor, dates, IDs")
-        w(f"    numeric_accuracy(w={actual_weights['numeric_accuracy']:.2f}) - harder: must be exact to the cent")
-        w(f"    line_item_f1    (w={actual_weights['line_item_f1']:.2f}) - hardest: multi-field matching")
+        for name, weight in actual_weights.items():
+            description = COMPONENT_DESCRIPTIONS.get(name, "")
+            w(f"    {name:<17}(w={weight:.2f}) - {description}")
+        w("")
+        w("  A component with nothing to verify in the ground truth is dropped and the")
+        w("  remaining weights renormalized, so partially annotated detail neither")
+        w("  rewards nor punishes the model.")
         w("")
 
         return "\n".join(lines)

@@ -16,6 +16,10 @@ class VerificationResult:
     score: float  # raw score
     max_score: float  # maximum possible score (for normalization)
     details: dict = field(default_factory=dict)
+    #: False when the ground truth holds nothing this verifier can check (e.g. an annotation
+    #: with no line items). The composite drops inapplicable components and renormalizes the
+    #: remaining weights, so an unannotated field neither rewards nor punishes the model.
+    applicable: bool = True
 
     @property
     def normalized_score(self) -> float:

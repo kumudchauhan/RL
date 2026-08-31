@@ -17,9 +17,10 @@ default_model = "claude-sonnet-4-20250514"
 module = "info_extract.verifiers.composite:CompositeVerifier"
 
 [verifier.weights]
-field_accuracy = 0.25
-numeric_accuracy = 0.35
-line_item_f1 = 0.40
+field_accuracy = 0.20
+numeric_accuracy = 0.30
+line_item_f1 = 0.35
+detail_accuracy = 0.15
 
 [runner]
 module = "info_extract.runner.evaluate:EvaluationRunner"
