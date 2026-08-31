@@ -8,7 +8,7 @@ from pathlib import Path
 from ..parsers.base import DocumentParser
 from ..parsers.eml_parser import EmlParser
 from ..parsers.pdf_parser import PdfParser
-from ..schemas import Fee, InvoiceExtraction, LineItem, Payment
+from ..schemas import Discount, Fee, InvoiceExtraction, LineItem, Payment
 from .tasks import ExtractionTask
 
 #: Annotation keys the extraction schema deliberately no longer carries. Annotations are the
@@ -81,7 +81,12 @@ def unexpected_keys(data: dict) -> list[str]:
     """
     unknown = [key for key in data if key not in InvoiceExtraction.model_fields]
 
-    nested_lists = (("payments", Payment), ("fees", Fee), ("line_items", LineItem))
+    nested_lists = (
+        ("payments", Payment),
+        ("fees", Fee),
+        ("discounts", Discount),
+        ("line_items", LineItem),
+    )
     for field_name, model in nested_lists:
         for index, entry in enumerate(data.get(field_name) or []):
             if isinstance(entry, dict):
