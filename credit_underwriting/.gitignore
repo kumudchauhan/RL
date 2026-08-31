@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Environment
+.env
+
+# OS / IDE
+.DS_Store
+.claude/
+
+# uv
+uv.lock
