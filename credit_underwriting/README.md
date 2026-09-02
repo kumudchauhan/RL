@@ -1,6 +1,8 @@
 # Credit Underwriting RLVR
 
-**Work In Progress**
+**Work In Progress!!!**
+
+
 A credit underwriting environment for RL from Verifiable Rewards: synthetic loan applications in,
 a structured underwriting decision out, scored by composable verifiers into a single reward. 
 
