@@ -1,8 +1,9 @@
 # Credit Underwriting RLVR
 
-**In Progress: Not a finished project**
+**Work In Progress**
 
-*Important Callout:* Current state : RLVR Infrastructure only, not implementing RL policy optimization
+
+*Current state : RLVR Infrastructure only, not implementing RL policy optimization*
 
 A credit underwriting environment for RL from Verifiable Rewards: synthetic loan applications in,
 a structured underwriting decision out, scored by composable verifiers into a single reward. No
