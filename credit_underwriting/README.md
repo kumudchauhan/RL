@@ -1,17 +1,17 @@
 # Credit Underwriting RLVR
 
 **Work In Progress**
-
-
-*Current state : RLVR Infrastructure only, not implementing RL policy optimization*
-
 A credit underwriting environment for RL from Verifiable Rewards: synthetic loan applications in,
-a structured underwriting decision out, scored by composable verifiers into a single reward. No
-LLM judges anywhere in the reward — every check is arithmetic, a set comparison, or a rerun of
-the written credit policy. 
+a structured underwriting decision out, scored by composable verifiers into a single reward. 
 
 
-**V1 Goal**
+**Note** 1. All underwriting policies and applicant data in this project are synthetic and intended
+solely for experimentation purposes.
+2. Current state : RLVR Infrastructure only, not implementing RL policy optimization
+
+
+
+**V1 Goal:**
 Build a self-contained financial RLVR simulation environment where an LLM produces a credit decision, deterministic verifiers calculate reward, and a simple RL/post-training loop that can be eventually optimized against that reward.
 V1a = complete environment + reward loop — **done**
 V1b = actual policy optimization — not started
@@ -20,16 +20,13 @@ V1b = actual policy optimization — not started
 
 |  |  |
 |---|---|
-| **What** | Hands a policy a loan application and a written credit policy, then scores the decision it submits — label, DTI, stated reasons, and cited evidence |
+| **What** | Hands a loan application and a written credit policy (rulebook) to the agent/LLM/Policy, then scores the decision it submits — label, DTI, stated reasons, and cited evidence |
 | **Why** | Underwriting is a natural RLVR target: the arithmetic is exact and the credit policy is written down, so most of decision quality is *checkable* without a human or a judge model |
 | **How it's scored** | Composite of four verifiers — decision 0.35 · DTI 0.25 · policy application 0.25 · evidence 0.15 — behind a schema gate |
 | **Baselines** | Oracle scores **1.000**; a degenerate always-approve policy scores **0.274**. That gap is the room a real policy has to earn |
-| **Privacy** | Every application is generated, not sampled — there is no borrower data in the repository |
-| **Status** | V1a complete: environment, verifiers, and reward work end to end. Policy optimization not started |
+| **Privacy** | Every application is synthetically generated, not sampled — there is no real borrower data in the repository |
+| **Status** | V1a complete: environment, verifiers, and reward work end-to-end. RL Policy optimization - not started |
 | **Stack** | Python 3.11+, uv, `anthropic`, Pydantic; 122 tests that run with no API key |
-
-**Note** All underwriting policies and applicant data in this project are synthetic and intended
-solely for experimentation purposes.
 
 **Contents** — [Applicant set](#the-applicant-set) · [Credit policy](#the-credit-policy) ·
 [Output schema](#what-the-policy-must-output) · [Verifiers](#the-verifiers) ·
