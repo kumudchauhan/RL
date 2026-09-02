@@ -1,11 +1,13 @@
 # Credit Underwriting RLVR
 
 **In Progress: Not a finished project**
+*Important Callout:* Current state : RLVR Infrastructure only, not implementing RL policy optimization
 
 A credit underwriting environment for RL from Verifiable Rewards: synthetic loan applications in,
 a structured underwriting decision out, scored by composable verifiers into a single reward. No
 LLM judges anywhere in the reward — every check is arithmetic, a set comparison, or a rerun of
-the written credit policy.
+the written credit policy. 
+
 
 **V1 Goal**
 Build a self-contained financial RLVR simulation environment where an LLM produces a credit decision, deterministic verifiers calculate reward, and a simple RL/post-training loop that can be eventually optimized against that reward.
